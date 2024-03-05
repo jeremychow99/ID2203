@@ -26,13 +26,19 @@ impl NodeRunner {
 }
 
 pub struct Node {
-    node_id: NodeId, // Unique identifier for the node
-                     // TODO Datastore and OmniPaxosDurability
+    node_id: NodeId,
+    omni_durability: OmniPaxosDurability, 
+    data_store: ExampleDatastore,
+    //
 }
 
 impl Node {
     pub fn new(node_id: NodeId, omni_durability: OmniPaxosDurability) -> Self {
-        todo!()
+        Node {
+            node_id,
+            omni_durability,
+            data_store: ExampleDatastore::new(),
+        }
     }
 
     /// update who is the current leader. If a follower becomes the leader,
@@ -40,7 +46,12 @@ impl Node {
     /// If a node loses leadership, it needs to rollback the txns committed in
     /// memory that have not been replicated yet.
     pub fn update_leader(&mut self) {
-        todo!()
+        let leader = self.omni_durability.omni_paxos.get_current_leader();
+        if leader == Some(self.node_id) {
+            self.apply_replicated_txns();
+        } else {
+            !todo!()
+        }
     }
 
     /// Apply the transactions that have been decided in OmniPaxos to the Datastore.
@@ -79,6 +90,7 @@ impl Node {
     fn advance_replicated_durability_offset(
         &self,
     ) -> Result<(), crate::datastore::error::DatastoreError> {
+        // omnipaxos logic or something
         todo!()
     }
 }
@@ -125,6 +137,7 @@ mod tests {
         let (sender_channels, mut receiver_channels) = initialise_channels();
         for pid in SERVERS {
             todo!("spawn the nodes")
+            //
         }
         nodes
     }
