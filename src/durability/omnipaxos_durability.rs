@@ -16,7 +16,7 @@ type OmniPaxosStruct = OmniPaxos<Transaction, MemoryStorage<Transaction>>;
 /// OmniPaxosDurability is an OmniPaxos node that should provide the replicated
 /// implementation of the DurabilityLayer trait required by the Datastore.
 pub struct OmniPaxosDurability {
-    pub omni_paxos: OmniPaxosStruct,
+   pub omni_paxos: OmniPaxosStruct,
     // more traits
 }
 
@@ -27,11 +27,13 @@ impl DurabilityLayer for OmniPaxosDurability {
         if let Some(entries) = self.omni_paxos.read_entries(..) {
             let iter = entries
                 .into_iter()
-                .flat_map(|log_entry| match log_entry {
-                    LogEntry::Decided(decided_entry) => Some(decided_entry),
-                    LogEntry::Undecided(undecided_entry) => Some(undecided_entry),
-                    LogEntry::Snapshotted(SnapshottedEntry { .. }) => None,
-                    LogEntry::Trimmed(_) | LogEntry::StopSign(_, _) => None,
+                .flat_map(|log_entry| {
+                    match log_entry {
+                        LogEntry::Decided(decided_entry) => Some(decided_entry),
+                        LogEntry::Undecided(_undecided_entry) => None,
+                        LogEntry::Snapshotted(SnapshottedEntry { .. }) => {None}
+                        LogEntry::Trimmed(_) | LogEntry::StopSign(_, _) => None,
+}
                 })
                 .map(|log_entry| {
                     let tx_offset = log_entry.tx_offset;
@@ -54,11 +56,13 @@ impl DurabilityLayer for OmniPaxosDurability {
         if let Some(entries) = self.omni_paxos.read_entries(offset.0..) {
             let iter = entries
                 .into_iter()
-                .flat_map(|log_entry| match log_entry {
-                    LogEntry::Decided(decided_entry) => Some(decided_entry),
-                    LogEntry::Undecided(undecided_entry) => Some(undecided_entry),
-                    LogEntry::Snapshotted(SnapshottedEntry { .. }) => None,
-                    LogEntry::Trimmed(_) | LogEntry::StopSign(_, _) => None,
+                .flat_map(|log_entry| {
+                    match log_entry {
+                        LogEntry::Decided(decided_entry) => Some(decided_entry),
+                        LogEntry::Undecided(undecided_entry) => Some(undecided_entry),
+                        LogEntry::Snapshotted(SnapshottedEntry { .. }) => {None}
+                        LogEntry::Trimmed(_) | LogEntry::StopSign(_, _) => None,
+                    }
                 })
                 .map(|log_entry| {
                     let tx_offset = log_entry.tx_offset;
@@ -85,4 +89,5 @@ impl DurabilityLayer for OmniPaxosDurability {
         let index = self.omni_paxos.get_decided_idx();
         return TxOffset(index);
     }
+    
 }

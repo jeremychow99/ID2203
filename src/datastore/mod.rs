@@ -2,6 +2,8 @@ pub(crate) mod error;
 pub mod example_datastore;
 pub mod tx_data;
 
+use std::ops::Add;
+
 use self::error::DatastoreError;
 use self::tx_data::{TxData, TxResult};
 use crate::durability::DurabilityLevel;
@@ -11,6 +13,14 @@ pub struct TableId(pub u32);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TxOffset(pub u64);
+
+impl Add<u64> for TxOffset {
+    type Output = TxOffset;
+
+    fn add(self, other: u64) -> TxOffset {
+        TxOffset(self.0 + other)
+    }
+}
 
 pub trait Datastore<K, V> {
     type Tx;
