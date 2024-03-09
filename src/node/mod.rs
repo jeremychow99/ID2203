@@ -245,11 +245,11 @@ mod tests {
 
     #[test]
     fn test_spawn_nodes() {
-        let (sender_channels, _receiver_channels) = initialise_channels();
+        let (sender_channels, receiver_channels) = initialise_channels();
         let mut runtime = create_runtime();
-        let nodes = spawn_nodes(&mut runtime, sender_channels.clone(), HashMap::new());
+        let nodes = spawn_nodes(&mut runtime, sender_channels, receiver_channels);
 
-        println!("{}", nodes.len());
+        println!("number of nodes: {}", nodes.len());
         assert!(nodes.len() == 3);
 
     }
