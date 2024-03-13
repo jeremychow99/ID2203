@@ -29,59 +29,95 @@ impl NodeRunner {
         self.node.lock().unwrap().omni_durability.omni_paxos.tick();
     }
 
+    // async fn send_outgoing_msgs(&mut self) {
+    //     let node_id = self.node.lock().unwrap().node_id;
+    //     let sender = self
+    //         .sender_channels
+    //         .get(&node_id)
+    //         .expect("Sender channel not found");
+    //     for out_msg in self
+    //         .node
+    //         .lock()
+    //         .unwrap()
+    //         .omni_durability
+    //         .omni_paxos
+    //         .outgoing_messages()
+    //     {
+    //         // Send out_msg to receiver on network layer
+    //         sender.send(out_msg).await.expect("Failed to send message");
+    //     }
+    // }
     async fn send_outgoing_msgs(&mut self) {
-        let node_id = self.node.lock().unwrap().node_id;
-        let sender = self
-            .sender_channels
-            .get(&node_id)
-            .expect("Sender channel not found");
-        for out_msg in self
+        let messages = self
             .node
             .lock()
             .unwrap()
             .omni_durability
             .omni_paxos
-            .outgoing_messages()
-        {
-            // Send out_msg to receiver on network layer
-            sender.send(out_msg).await.expect("Failed to send message");
-        }
-    }
-
-    async fn handle_incoming_msgs(&mut self) {
-        let mut node = self.node.lock().unwrap();
-        let node_id = node.node_id;
-        let receiver_arc = self
-            .receiver_channels
-            .get(&node_id)
-            .expect("Receiver channel not found");
-        let mut receiver = receiver_arc.lock().unwrap();
-
-        loop {
-            match receiver.recv().await {
-                Some(msg) => {
-                    // Handle incoming message
-                    node.omni_durability.omni_paxos.handle_incoming(msg);
-                }
-                None => {
-                    // Channel closed
-                    break;
-                }
+            .outgoing_messages();
+        for msg in messages {
+            let receiver = msg.get_receiver();
+            let channel = self
+                .outgoing
+                .get_mut(&receiver)
+                .expect("No channels");
+            if !self.node.lock().unwrap().seperated_nodes.contains(&receiver) {
+                let _ = channel.send(msg).await;
             }
         }
     }
+    
+
+    // async fn handle_incoming_msgs(&mut self) {
+    //     let mut node = self.node.lock().unwrap();
+    //     let node_id = node.node_id;
+    //     let receiver_arc = self
+    //         .receiver_channels
+    //         .get(&node_id)
+    //         .expect("Receiver channel not found");
+    //     let mut receiver = receiver_arc.lock().unwrap();
+
+    //     loop {
+    //         match receiver.recv().await {
+    //             Some(msg) => {
+    //                 // Handle incoming message
+    //                 node.omni_durability.omni_paxos.handle_incoming(msg);
+    //             }
+    //             None => {
+    //                 // Channel closed
+    //                 break;
+    //             }
+    //         }
+    //     }
+    // }
 
     pub async fn run(&mut self) {
-        let mut ticker = tokio::time::interval(Duration::from_millis(100));
-    
+        self.node.lock().unwrap().update_leader();
+        let mut outgoing_interval = time::interval(OUTGOING_MESSAGE_PERIOD);
+        let mut tick_interval = time::interval(TICK_PERIOD);
+        let mut update_db_tick_interval = time::interval(UPDATE_DB_PERIOD);
+        let mut remove_ndisconected_nodes_interval = time::interval(UPDATE_DB_PERIOD);
+
+        sleep(Duration::from_secs(1)).await;
+        // Call the method to send outgoing messages
+        // self.send_outgoing_msgs().await;
         loop {
             tokio::select! {
-                _ = ticker.tick() => {
-                    self.tick().await;
+                biased;
+                _ = tick_interval.tick() => {
+                    self.node.lock().unwrap().omni_durability.omni_paxos.tick();
+                    self.node.lock().unwrap().update_leader();
+                },
+                _ = outgoing_interval.tick() => { 
                     self.send_outgoing_msgs().await;
-                    self.handle_incoming_msgs().await;
+                },
+                _ = update_db_tick_interval.tick() => {
+                    self.node.lock().unwrap().apply_replicated_txns();
+                },
+                Some(msg) = self.incoming.recv() => {
+                    let receiver = msg.get_receiver();
+                    self.node.lock().unwrap().omni_durability.omni_paxos.handle_incoming(msg);
                 }
-
             }
         }
     }
