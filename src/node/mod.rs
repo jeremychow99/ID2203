@@ -10,13 +10,21 @@ use omnipaxos::{ClusterConfig, OmniPaxos, OmniPaxosConfig, ServerConfig};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tokio::time::sleep;
 use tokio::time::Duration;
+use tokio::time::{self, sleep};
 
 use crate::durability::omnipaxos_durability::Transaction;
 
 use self::tx_data::DeleteList;
 
+pub const BUFFER_SIZE: usize = 10000;
+        pub const ELECTION_TICK_TIMEOUT: u64 = 5;
+        pub const TICK_PERIOD: Duration = Duration::from_millis(10);
+        pub const OUTGOING_MESSAGE_PERIOD: Duration = Duration::from_millis(1);
+        pub const UPDATE_DB_PERIOD: Duration = Duration::from_millis(1);
+
+        pub const WAIT_LEADER_TIMEOUT: Duration = Duration::from_millis(500);
+        pub const WAIT_DECIDED_TIMEOUT: Duration = Duration::from_millis(50);
 pub struct NodeRunner {
     pub node: Arc<Mutex<Node>>,
     incoming: mpsc::Receiver<Message<Transaction>>,
@@ -54,15 +62,15 @@ impl NodeRunner {
         for msg in messages {
             let receiver = msg.get_receiver();
             let channel = self.outgoing.get_mut(&receiver).expect("No channels");
-            if !self
-                .node
-                .lock()
-                .unwrap()
-                .seperated_nodes
-                .contains(&receiver)
-            {
-                let _ = channel.send(msg).await;
-            }
+            // if !self
+            //     .node
+            //     .lock()
+            //     .unwrap()
+            //     .seperated_nodes
+            //     .contains(&receiver)
+            // {
+            let _ = channel.send(msg).await;
+            // }
         }
     }
 
@@ -223,8 +231,8 @@ impl Node {
         &self,
     ) -> Result<(), crate::datastore::error::DatastoreError> {
         // advance the replicated durability offset
-        self.data_store
-            .advance_replicated_durability_offset(self.tx_offset)
+        let tx_offset = self.omni_durability.get_durable_tx_offset();
+        self.data_store.advance_replicated_durability_offset(tx_offset)
     }
 }
 
@@ -256,8 +264,6 @@ mod tests {
         HashMap<NodeId, mpsc::Sender<Message<Transaction>>>,
         HashMap<NodeId, mpsc::Receiver<Message<Transaction>>>,
     ) {
-        const BUFFER_SIZE: usize = 100;
-
         // Create HashMaps to store senders and receivers
         let mut sender_channels = HashMap::new();
         let mut receiver_channels = HashMap::new();
@@ -312,15 +318,13 @@ mod tests {
 
             // Create an instance of Node
             let node = Arc::new(Mutex::new(Node::new(node_id, omni_durability)));
-            
-            // Spawn a task for the NodeRunner
-            let handle = runtime.spawn(async move {
-                let mut node_runner = NodeRunner {
-                    node: Arc::clone(&node),
-                    incoming: receiver_channels.remove(&node_id).unwrap(),
-                    outgoing: sender_channels.clone(),
-                };
+            let mut node_runner = NodeRunner {
+                node: Arc::clone(&node),
+                incoming: receiver_channels.remove(&node_id).unwrap(),
+                outgoing: sender_channels.clone(),
+            };
 
+            let handle = runtime.spawn(async move {
                 node_runner.run().await;
             });
 
@@ -334,8 +338,7 @@ mod tests {
     #[test]
     fn test_spawn_nodes() {
         let mut runtime = create_runtime();
-        let nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> =
-            spawn_nodes(&mut runtime);
+        let nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
 
         println!("Number of nodes: {}", nodes.len());
 
