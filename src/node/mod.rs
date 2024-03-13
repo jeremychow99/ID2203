@@ -18,13 +18,13 @@ use crate::durability::omnipaxos_durability::Transaction;
 use self::tx_data::DeleteList;
 
 pub const BUFFER_SIZE: usize = 10000;
-        pub const ELECTION_TICK_TIMEOUT: u64 = 5;
-        pub const TICK_PERIOD: Duration = Duration::from_millis(10);
-        pub const OUTGOING_MESSAGE_PERIOD: Duration = Duration::from_millis(1);
-        pub const UPDATE_DB_PERIOD: Duration = Duration::from_millis(1);
+pub const ELECTION_TICK_TIMEOUT: u64 = 5;
+pub const TICK_PERIOD: Duration = Duration::from_millis(10);
+pub const OUTGOING_MESSAGE_PERIOD: Duration = Duration::from_millis(1);
+pub const UPDATE_DB_PERIOD: Duration = Duration::from_millis(1);
 
-        pub const WAIT_LEADER_TIMEOUT: Duration = Duration::from_millis(500);
-        pub const WAIT_DECIDED_TIMEOUT: Duration = Duration::from_millis(50);
+pub const WAIT_LEADER_TIMEOUT: Duration = Duration::from_millis(500);
+pub const WAIT_DECIDED_TIMEOUT: Duration = Duration::from_millis(50);
 pub struct NodeRunner {
     pub node: Arc<Mutex<Node>>,
     incoming: mpsc::Receiver<Message<Transaction>>,
@@ -73,29 +73,6 @@ impl NodeRunner {
             // }
         }
     }
-
-    // async fn handle_incoming_msgs(&mut self) {
-    //     let mut node = self.node.lock().unwrap();
-    //     let node_id = node.node_id;
-    //     let receiver_arc = self
-    //         .receiver_channels
-    //         .get(&node_id)
-    //         .expect("Receiver channel not found");
-    //     let mut receiver = receiver_arc.lock().unwrap();
-
-    //     loop {
-    //         match receiver.recv().await {
-    //             Some(msg) => {
-    //                 // Handle incoming message
-    //                 node.omni_durability.omni_paxos.handle_incoming(msg);
-    //             }
-    //             None => {
-    //                 // Channel closed
-    //                 break;
-    //             }
-    //         }
-    //     }
-    // }
 
     pub async fn run(&mut self) {
         self.node.lock().unwrap().update_leader();
@@ -171,13 +148,16 @@ impl Node {
     /// We need to be careful with which nodes should do this according to desired
     /// behavior in the Datastore as defined by the application.
     fn apply_replicated_txns(&mut self) {
+        // apply replicated transactions if follower
         let txns = self.omni_durability.iter();
+        // apply replicated transactions if follower
+        let txns_vec: Vec<_> = self.omni_durability.iter().collect();
+        let length = txns_vec.len();
+        // println!("Length of txns: {}", length);
 
-        for (tx_offset, tx_data) in txns {
-            if tx_offset > self.tx_offset {
-                self.tx_offset = tx_offset;
-                let _ = self.data_store.replay_transaction(&tx_data);
-            }
+        for (tx_offset, tx_data) in txns_vec {
+            // self.advance_replicated_durability_offset().unwrap();
+            let _ = self.data_store.replay_transaction(&tx_data);
         }
     }
 
@@ -231,8 +211,10 @@ impl Node {
         &self,
     ) -> Result<(), crate::datastore::error::DatastoreError> {
         // advance the replicated durability offset
+
         let tx_offset = self.omni_durability.get_durable_tx_offset();
-        self.data_store.advance_replicated_durability_offset(tx_offset)
+        self.data_store
+            .advance_replicated_durability_offset(tx_offset)
     }
 }
 
@@ -343,7 +325,7 @@ mod tests {
         println!("Number of nodes: {}", nodes.len());
 
         runtime.block_on(async {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         });
 
         // Retrieve the node to test
@@ -370,6 +352,10 @@ mod tests {
         mut_tx.set("test".to_string(), "testvalue".to_string());
         let tx_res = leader_node.commit_mut_tx(mut_tx);
 
+        runtime.block_on(async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+
         // Verify the committed data
         let tx = leader_node.begin_tx(DurabilityLevel::Memory);
         let res = tx.get(&"test".to_string());
@@ -383,10 +369,13 @@ mod tests {
         // Verify the committed data
         let (node_2, _) = nodes.get(&2).expect("Node not found");
         {
-            let mut node_2 = node_2.lock().unwrap();
-            node_2.apply_replicated_txns();
-            node_2.begin_tx(DurabilityLevel::Memory);
-            let tx = node_2.begin_tx(DurabilityLevel::Memory);
+            let node_2 = node_2.lock().unwrap();
+
+            runtime.block_on(async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            });
+
+            let tx = node_2.begin_tx(DurabilityLevel::Replicated);
             let res = tx.get(&"test".to_string());
             if let Some(value) = res {
                 println!("Transaction result: {}", value);
