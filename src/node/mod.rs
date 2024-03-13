@@ -358,10 +358,10 @@ mod tests {
                 .get_current_leader()
                 .expect("Leader ID not found")
         };
-        println!("Leader ID: {:?}", leader_id);
 
+        println!("Leader ID: {}", leader_id);
         // Example: Mutate data and commit transaction
-        let (leader_node, _) = nodes.get(&1).expect("Leader not found");
+        let (leader_node, _) = nodes.get(&leader_id).expect("Leader not found");
         let mut leader_node = leader_node.lock().unwrap();
         println!("leader node {}", leader_node.node_id);
 
