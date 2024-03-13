@@ -9,6 +9,12 @@ use omnipaxos::util::NodeId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use tokio::time::sleep;
+use tokio::time::Duration;
+
+use crate::durability::omnipaxos_durability::Transaction;
+
+use self::tx_data::DeleteList;
 
 pub struct NodeRunner {
     pub node: Arc<Mutex<Node>>,
@@ -17,22 +23,99 @@ pub struct NodeRunner {
 
 impl NodeRunner {
     async fn send_outgoing_msgs(&mut self) {
-        todo!()
+        let messages = self
+            .node
+            .lock()
+            .unwrap()
+            .omni_durability
+            .omni_paxos
+            .outgoing_messages();
+        for msg in messages {
+            let receiver = msg.get_receiver();
+            let channel = self.outgoing.get_mut(&receiver).expect("No channels");
+            if !self
+                .node
+                .lock()
+                .unwrap()
+                .seperated_nodes
+                .contains(&receiver)
+            {
+                let _ = channel.send(msg).await;
+            }
+        }
     }
 
+    // async fn handle_incoming_msgs(&mut self) {
+    //     let mut node = self.node.lock().unwrap();
+    //     let node_id = node.node_id;
+    //     let receiver_arc = self
+    //         .receiver_channels
+    //         .get(&node_id)
+    //         .expect("Receiver channel not found");
+    //     let mut receiver = receiver_arc.lock().unwrap();
+
+    //     loop {
+    //         match receiver.recv().await {
+    //             Some(msg) => {
+    //                 // Handle incoming message
+    //                 node.omni_durability.omni_paxos.handle_incoming(msg);
+    //             }
+    //             None => {
+    //                 // Channel closed
+    //                 break;
+    //             }
+    //         }
+    //     }
+    // }
+
     pub async fn run(&mut self) {
-        todo!()
+        self.node.lock().unwrap().update_leader();
+        let mut outgoing_interval = time::interval(OUTGOING_MESSAGE_PERIOD);
+        let mut tick_interval = time::interval(TICK_PERIOD);
+        let mut update_db_tick_interval = time::interval(UPDATE_DB_PERIOD);
+        let mut remove_ndisconected_nodes_interval = time::interval(UPDATE_DB_PERIOD);
+
+        sleep(Duration::from_secs(1)).await;
+        // Call the method to send outgoing messages
+        // self.send_outgoing_msgs().await;
+        loop {
+            tokio::select! {
+                biased;
+                _ = tick_interval.tick() => {
+                    self.node.lock().unwrap().omni_durability.omni_paxos.tick();
+                    self.node.lock().unwrap().update_leader();
+                },
+                _ = outgoing_interval.tick() => {
+                    self.send_outgoing_msgs().await;
+                },
+                _ = update_db_tick_interval.tick() => {
+                    self.node.lock().unwrap().apply_replicated_txns();
+                },
+                Some(msg) = self.incoming.recv() => {
+                    let receiver = msg.get_receiver();
+                    self.node.lock().unwrap().omni_durability.omni_paxos.handle_incoming(msg);
+                }
+            }
+        }
     }
 }
 
 pub struct Node {
-    node_id: NodeId, // Unique identifier for the node
-                     // TODO Datastore and OmniPaxosDurability
+    node_id: NodeId,
+    tx_offset: TxOffset,
+    pub omni_durability: OmniPaxosDurability,
+    data_store: ExampleDatastore,
+    //
 }
 
 impl Node {
     pub fn new(node_id: NodeId, omni_durability: OmniPaxosDurability) -> Self {
-        todo!()
+        Node {
+            node_id,
+            tx_offset: TxOffset(0),
+            omni_durability,
+            data_store: ExampleDatastore::new(),
+        }
     }
 
     /// update who is the current leader. If a follower becomes the leader,
@@ -40,14 +123,33 @@ impl Node {
     /// If a node loses leadership, it needs to rollback the txns committed in
     /// memory that have not been replicated yet.
     pub fn update_leader(&mut self) {
-        todo!()
+        //IMPORTANT
+        // call tick to increment clocks
+        for _ in 0..100 {
+            self.omni_durability.omni_paxos.tick();
+        }
+
+        let leader = self.omni_durability.omni_paxos.get_current_leader();
+        if leader == Some(self.node_id) {
+            self.apply_replicated_txns();
+        } else {
+            // if no longer leader, rollback txns committed in memory
+            let _ = self.data_store.rollback_to_replicated_durability_offset();
+        }
     }
 
     /// Apply the transactions that have been decided in OmniPaxos to the Datastore.
     /// We need to be careful with which nodes should do this according to desired
     /// behavior in the Datastore as defined by the application.
     fn apply_replicated_txns(&mut self) {
-        todo!()
+        let txns = self.omni_durability.iter();
+
+        for (tx_offset, tx_data) in txns {
+            if tx_offset > self.tx_offset {
+                self.tx_offset = tx_offset;
+                let _ = self.data_store.replay_transaction(&tx_data);
+            }
+        }
     }
 
     pub fn begin_tx(
@@ -73,13 +175,30 @@ impl Node {
         &mut self,
         tx: <ExampleDatastore as Datastore<String, String>>::MutTx,
     ) -> Result<TxResult, DatastoreError> {
-        todo!()
+        if self.omni_durability.omni_paxos.get_current_leader() == Some(self.node_id) {
+            // If the current node is the leader, commit the mutable transaction
+            let tx_offset = self.tx_offset + 1;
+            let res = self.data_store.commit_mut_tx(tx);
+
+            match res {
+                Ok(tx_result) => {
+                    let tx_data = tx_result.tx_data.clone(); // Extract tx_data from TxResult
+                    self.omni_durability.append_tx(tx_offset, tx_data);
+                    Ok(tx_result)
+                }
+                Err(err) => Err(err),
+            }
+        } else {
+            Err(DatastoreError::NotLeader)
+        }
     }
 
     fn advance_replicated_durability_offset(
         &self,
     ) -> Result<(), crate::datastore::error::DatastoreError> {
-        todo!()
+        // advance the replicated durability offset
+        self.data_store
+            .advance_replicated_durability_offset(self.tx_offset)
     }
 }
 
@@ -123,9 +242,117 @@ mod tests {
     fn spawn_nodes(runtime: &mut Runtime) -> HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)> {
         let mut nodes = HashMap::new();
         let (sender_channels, mut receiver_channels) = initialise_channels();
-        for pid in SERVERS {
-            todo!("spawn the nodes")
+
+        for node_id in SERVERS {
+            let storage = MemoryStorage::default();
+
+            let cluster_config = ClusterConfig {
+                configuration_id: 1,
+                nodes: vec![1, 2, 3],
+                ..Default::default()
+            };
+
+            let server_config = ServerConfig {
+                pid: node_id,
+                ..Default::default()
+            };
+
+            let omnipaxos_config = OmniPaxosConfig {
+                cluster_config,
+                server_config,
+            };
+
+            let omni_paxos: OmniPaxos<Transaction, MemoryStorage<Transaction>> =
+                omnipaxos_config.build(storage.clone()).unwrap();
+
+            // Create an instance of OmniPaxosDurability with appropriate parameters
+            let omni_durability = OmniPaxosDurability {
+                omni_paxos: omni_paxos,
+            };
+
+            // Create an instance of Node
+            let node = Arc::new(Mutex::new(Node::new(node_id, omni_durability)));
+            
+            // Spawn a task for the NodeRunner
+            let handle = runtime.spawn(async move {
+                let mut node_runner = NodeRunner {
+                    node: Arc::clone(&node),
+                    incoming: receiver_channels.remove(&node_id).unwrap(),
+                    outgoing: sender_channels.clone(),
+                };
+
+                node_runner.run().await;
+            });
+
+            // Insert the node and handle into the HashMap
+            nodes.insert(node_id, (node, handle));
         }
+
         nodes
+    }
+
+    #[test]
+    fn test_spawn_nodes() {
+        let mut runtime = create_runtime();
+        let nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> =
+            spawn_nodes(&mut runtime);
+
+        println!("Number of nodes: {}", nodes.len());
+
+        runtime.block_on(async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
+        // Retrieve the node to test
+        let (node, _) = nodes.get(&1).expect("Node not found");
+
+        // Access the Node instance and perform transactions
+        let leader_id = {
+            let node_ref = node.lock().unwrap();
+            node_ref
+                .omni_durability
+                .omni_paxos
+                .get_current_leader()
+                .expect("Leader ID not found")
+        };
+        println!("Leader ID: {:?}", leader_id);
+
+        // Example: Mutate data and commit transaction
+        let (leader_node, _) = nodes.get(&1).expect("Leader not found");
+        let mut leader_node = leader_node.lock().unwrap();
+        println!("leader node {}", leader_node.node_id);
+
+        let mut mut_tx = leader_node.begin_mut_tx().unwrap();
+
+        mut_tx.set("test".to_string(), "testvalue".to_string());
+        let tx_res = leader_node.commit_mut_tx(mut_tx);
+
+        // Verify the committed data
+        let tx = leader_node.begin_tx(DurabilityLevel::Memory);
+        let res = tx.get(&"test".to_string());
+        if let Some(value) = res {
+            println!("Transaction result: {}", value);
+            assert_eq!(value, "testvalue");
+        } else {
+            println!("Transaction result is None.");
+        }
+
+        // Verify the committed data
+        let (node_2, _) = nodes.get(&2).expect("Node not found");
+        {
+            let mut node_2 = node_2.lock().unwrap();
+            node_2.apply_replicated_txns();
+            node_2.begin_tx(DurabilityLevel::Memory);
+            let tx = node_2.begin_tx(DurabilityLevel::Memory);
+            let res = tx.get(&"test".to_string());
+            if let Some(value) = res {
+                println!("Transaction result: {}", value);
+                assert_eq!(value, "testvalue");
+            } else {
+                println!("Transaction result is None.");
+            }
+        };
+
+        assert_eq!(nodes.len(), 3); // Ensure the expected number of nodes
     }
 }
