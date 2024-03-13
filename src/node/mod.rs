@@ -108,7 +108,6 @@ impl NodeRunner {
 
 pub struct Node {
     node_id: NodeId,
-    tx_offset: TxOffset,
     pub omni_durability: OmniPaxosDurability,
     data_store: ExampleDatastore,
     //
@@ -118,7 +117,6 @@ impl Node {
     pub fn new(node_id: NodeId, omni_durability: OmniPaxosDurability) -> Self {
         Node {
             node_id,
-            tx_offset: TxOffset(0),
             omni_durability,
             data_store: ExampleDatastore::new(),
         }
@@ -191,13 +189,12 @@ impl Node {
     ) -> Result<TxResult, DatastoreError> {
         if self.omni_durability.omni_paxos.get_current_leader() == Some(self.node_id) {
             // If the current node is the leader, commit the mutable transaction
-            let tx_offset = self.tx_offset + 1;
             let res = self.data_store.commit_mut_tx(tx);
 
             match res {
                 Ok(tx_result) => {
                     let tx_data = tx_result.tx_data.clone(); // Extract tx_data from TxResult
-                    self.omni_durability.append_tx(tx_offset, tx_data);
+                    self.omni_durability.append_tx(tx_result.tx_offset.clone(), tx_data);
                     Ok(tx_result)
                 }
                 Err(err) => Err(err),

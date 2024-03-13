@@ -30,7 +30,7 @@ impl DurabilityLayer for OmniPaxosDurability {
                 .flat_map(|log_entry| {
                     match log_entry {
                         LogEntry::Decided(decided_entry) => Some(decided_entry),
-                        LogEntry::Undecided(_undecided_entry) => None,
+                        LogEntry::Undecided(_undecided_entry) => Some(_undecided_entry),
                         LogEntry::Snapshotted(SnapshottedEntry { .. }) => {None}
                         LogEntry::Trimmed(_) | LogEntry::StopSign(_, _) => None,
 }
