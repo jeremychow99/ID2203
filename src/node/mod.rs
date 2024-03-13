@@ -5,7 +5,8 @@ use crate::datastore::*;
 use crate::durability::omnipaxos_durability::OmniPaxosDurability;
 use crate::durability::{DurabilityLayer, DurabilityLevel};
 use omnipaxos::messages::*;
-use omnipaxos::util::NodeId;
+use omnipaxos::util::{LogEntry, NodeId};
+use omnipaxos::{ClusterConfig, OmniPaxos, OmniPaxosConfig, ServerConfig};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -18,10 +19,30 @@ use self::tx_data::DeleteList;
 
 pub struct NodeRunner {
     pub node: Arc<Mutex<Node>>,
+    incoming: mpsc::Receiver<Message<Transaction>>,
+    outgoing: HashMap<NodeId, mpsc::Sender<Message<Transaction>>>,
     // TODO Messaging and running
 }
 
 impl NodeRunner {
+    // async fn send_outgoing_msgs(&mut self) {
+    //     let node_id = self.node.lock().unwrap().node_id;
+    //     let sender = self
+    //         .sender_channels
+    //         .get(&node_id)
+    //         .expect("Sender channel not found");
+    //     for out_msg in self
+    //         .node
+    //         .lock()
+    //         .unwrap()
+    //         .omni_durability
+    //         .omni_paxos
+    //         .outgoing_messages()
+    //     {
+    //         // Send out_msg to receiver on network layer
+    //         sender.send(out_msg).await.expect("Failed to send message");
+    //     }
+    // }
     async fn send_outgoing_msgs(&mut self) {
         let messages = self
             .node
@@ -156,18 +177,23 @@ impl Node {
         &self,
         durability_level: DurabilityLevel,
     ) -> <ExampleDatastore as Datastore<String, String>>::Tx {
-        todo!()
+        self.data_store.begin_tx(durability_level)
     }
 
     pub fn release_tx(&self, tx: <ExampleDatastore as Datastore<String, String>>::Tx) {
-        todo!()
+        self.data_store.release_tx(tx);
     }
 
     /// Begins a mutable transaction. Only the leader is allowed to do so.
     pub fn begin_mut_tx(
         &self,
     ) -> Result<<ExampleDatastore as Datastore<String, String>>::MutTx, DatastoreError> {
-        todo!()
+        if self.omni_durability.omni_paxos.get_current_leader() == Some(self.node_id) {
+            // If the current node is the leader, begin a mutable transaction
+            Ok(self.data_store.begin_mut_tx())
+        } else {
+            Err(DatastoreError::NotLeader)
+        }
     }
 
     /// Commits a mutable transaction. Only the leader is allowed to do so.
@@ -212,9 +238,11 @@ impl Node {
 /// A few helper functions to help structure your tests have been defined that you are welcome to use.
 #[cfg(test)]
 mod tests {
+    use crate::durability::omnipaxos_durability::Transaction;
     use crate::node::*;
     use omnipaxos::messages::Message;
     use omnipaxos::util::NodeId;
+    use omnipaxos_storage::memory_storage::MemoryStorage;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tokio::runtime::{Builder, Runtime};
@@ -225,10 +253,21 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     fn initialise_channels() -> (
-        HashMap<NodeId, mpsc::Sender<Message<_>>>,
-        HashMap<NodeId, mpsc::Receiver<Message<_>>>,
+        HashMap<NodeId, mpsc::Sender<Message<Transaction>>>,
+        HashMap<NodeId, mpsc::Receiver<Message<Transaction>>>,
     ) {
-        todo!()
+        const BUFFER_SIZE: usize = 100;
+
+        // Create HashMaps to store senders and receivers
+        let mut sender_channels = HashMap::new();
+        let mut receiver_channels = HashMap::new();
+
+        for node_id in SERVERS {
+            let (sender, receiver) = mpsc::channel(BUFFER_SIZE);
+            sender_channels.insert(node_id, sender);
+            receiver_channels.insert(node_id, receiver);
+        }
+        (sender_channels, receiver_channels)
     }
 
     fn create_runtime() -> Runtime {
@@ -241,6 +280,7 @@ mod tests {
 
     fn spawn_nodes(runtime: &mut Runtime) -> HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)> {
         let mut nodes = HashMap::new();
+
         let (sender_channels, mut receiver_channels) = initialise_channels();
 
         for node_id in SERVERS {
