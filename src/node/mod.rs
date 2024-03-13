@@ -19,16 +19,12 @@ use self::tx_data::DeleteList;
 
 pub struct NodeRunner {
     pub node: Arc<Mutex<Node>>,
-    sender_channels: HashMap<NodeId, mpsc::Sender<Message<Transaction>>>,
-    receiver_channels: HashMap<NodeId, Arc<Mutex<mpsc::Receiver<Message<Transaction>>>>>,
+    incoming: mpsc::Receiver<Message<Transaction>>,
+    outgoing: HashMap<NodeId, mpsc::Sender<Message<Transaction>>>,
     // TODO Messaging and running
 }
 
 impl NodeRunner {
-    async fn tick(&mut self) {
-        self.node.lock().unwrap().omni_durability.omni_paxos.tick();
-    }
-
     // async fn send_outgoing_msgs(&mut self) {
     //     let node_id = self.node.lock().unwrap().node_id;
     //     let sender = self
@@ -57,16 +53,18 @@ impl NodeRunner {
             .outgoing_messages();
         for msg in messages {
             let receiver = msg.get_receiver();
-            let channel = self
-                .outgoing
-                .get_mut(&receiver)
-                .expect("No channels");
-            if !self.node.lock().unwrap().seperated_nodes.contains(&receiver) {
+            let channel = self.outgoing.get_mut(&receiver).expect("No channels");
+            if !self
+                .node
+                .lock()
+                .unwrap()
+                .seperated_nodes
+                .contains(&receiver)
+            {
                 let _ = channel.send(msg).await;
             }
         }
     }
-    
 
     // async fn handle_incoming_msgs(&mut self) {
     //     let mut node = self.node.lock().unwrap();
@@ -108,7 +106,7 @@ impl NodeRunner {
                     self.node.lock().unwrap().omni_durability.omni_paxos.tick();
                     self.node.lock().unwrap().update_leader();
                 },
-                _ = outgoing_interval.tick() => { 
+                _ = outgoing_interval.tick() => {
                     self.send_outgoing_msgs().await;
                 },
                 _ = update_db_tick_interval.tick() => {
@@ -121,10 +119,6 @@ impl NodeRunner {
             }
         }
     }
-    
-    
-    
-    
 }
 
 pub struct Node {
@@ -265,18 +259,15 @@ mod tests {
         const BUFFER_SIZE: usize = 100;
 
         // Create HashMaps to store senders and receivers
-        let mut senders = HashMap::new();
-        let mut receivers = HashMap::new();
+        let mut sender_channels = HashMap::new();
+        let mut receiver_channels = HashMap::new();
 
-        for &node_id in SERVERS.iter() {
-            // Create a channel for each node
-            let (sender, receiver) = mpsc::channel::<Message<Transaction>>(BUFFER_SIZE);
-
-            // Insert the sender and receiver into the HashMaps
-            senders.insert(node_id, sender);
-            receivers.insert(node_id, receiver);
+        for node_id in SERVERS {
+            let (sender, receiver) = mpsc::channel(BUFFER_SIZE);
+            sender_channels.insert(node_id, sender);
+            receiver_channels.insert(node_id, receiver);
         }
-        (senders, receivers)
+        (sender_channels, receiver_channels)
     }
 
     fn create_runtime() -> Runtime {
@@ -287,75 +278,64 @@ mod tests {
             .unwrap()
     }
 
-    fn spawn_nodes(
-        runtime: &mut Runtime,
-        sender_channels: HashMap<NodeId, mpsc::Sender<Message<Transaction>>>,
-        receiver_channels: HashMap<NodeId, Arc<Mutex<mpsc::Receiver<Message<Transaction>>>>>,
-    ) -> HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)> {
+    fn spawn_nodes(runtime: &mut Runtime) -> HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)> {
         let mut nodes = HashMap::new();
-    
+
+        let (sender_channels, mut receiver_channels) = initialise_channels();
+
         for node_id in SERVERS {
             let storage = MemoryStorage::default();
-    
+
             let cluster_config = ClusterConfig {
                 configuration_id: 1,
                 nodes: vec![1, 2, 3],
                 ..Default::default()
             };
-    
+
             let server_config = ServerConfig {
                 pid: node_id,
                 ..Default::default()
             };
-    
+
             let omnipaxos_config = OmniPaxosConfig {
                 cluster_config,
                 server_config,
             };
-    
+
             let omni_paxos: OmniPaxos<Transaction, MemoryStorage<Transaction>> =
                 omnipaxos_config.build(storage.clone()).unwrap();
-    
+
             // Create an instance of OmniPaxosDurability with appropriate parameters
             let omni_durability = OmniPaxosDurability {
                 omni_paxos: omni_paxos,
             };
-    
+
             // Create an instance of Node
             let node = Arc::new(Mutex::new(Node::new(node_id, omni_durability)));
-    
-            let cloned_node = Arc::clone(&node);
-            let sender_channels_clone = sender_channels.clone();
-            let receiver_channels_clone = receiver_channels.clone();
-    
+            
             // Spawn a task for the NodeRunner
             let handle = runtime.spawn(async move {
                 let mut node_runner = NodeRunner {
-                    node: cloned_node,
-                    sender_channels: sender_channels_clone,
-                    receiver_channels: receiver_channels_clone,
+                    node: Arc::clone(&node),
+                    incoming: receiver_channels.remove(&node_id).unwrap(),
+                    outgoing: sender_channels.clone(),
                 };
-    
+
                 node_runner.run().await;
             });
-    
+
             // Insert the node and handle into the HashMap
             nodes.insert(node_id, (node, handle));
         }
-    
+
         nodes
     }
-    
+
     #[test]
     fn test_spawn_nodes() {
-        let (sender_channels, receiver_channels) = initialise_channels();
-        let receiver_channels: HashMap<NodeId, Arc<Mutex<mpsc::Receiver<Message<Transaction>>>>> =
-        receiver_channels
-            .into_iter()
-            .map(|(k, v)| (k, Arc::new(Mutex::new(v))))
-            .collect();
         let mut runtime = create_runtime();
-        let nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime, sender_channels, receiver_channels);
+        let nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> =
+            spawn_nodes(&mut runtime);
 
         println!("Number of nodes: {}", nodes.len());
 
