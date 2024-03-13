@@ -61,6 +61,8 @@ impl NodeRunner {
             .outgoing_messages();
         for msg in messages {
             let receiver = msg.get_receiver();
+            // println!("message: {:?}", msg);
+            // println!("Receiver: {}", receiver);
             let channel = self.outgoing.get_mut(&receiver).expect("No channels");
             // if !self
             //     .node
@@ -69,7 +71,8 @@ impl NodeRunner {
             //     .seperated_nodes
             //     .contains(&receiver)
             // {
-            let _ = channel.send(msg).await;
+            let res = channel.send(msg).await;
+            // println!("{}", res.is_ok());
             // }
         }
     }
@@ -129,7 +132,7 @@ impl Node {
     pub fn update_leader(&mut self) {
         //IMPORTANT
         // call tick to increment clocks
-        for _ in 0..100 {
+        for _ in 0..10 {
             self.omni_durability.omni_paxos.tick();
         }
 
@@ -148,13 +151,18 @@ impl Node {
     fn apply_replicated_txns(&mut self) {
         // apply replicated transactions if follower
         let txns = self.omni_durability.iter();
-        // apply replicated transactions if follower
+        let decided_entries = self.omni_durability.omni_paxos.read_decided_suffix(0);
+        // println!("Decided entries: {:?}", decided_entries);
+
         let txns_vec: Vec<_> = self.omni_durability.iter().collect();
+        if let Some(first_entry) = txns_vec.first() {
+            println!("First entry: {:?}", first_entry);
+        }
         let length = txns_vec.len();
         // println!("Length of txns: {}", length);
+        self.advance_replicated_durability_offset().unwrap();
 
-        for (tx_offset, tx_data) in txns_vec {
-            // self.advance_replicated_durability_offset().unwrap();
+        for (tx_offset, tx_data) in txns {
             let _ = self.data_store.replay_transaction(&tx_data);
         }
     }
@@ -193,8 +201,8 @@ impl Node {
 
             match res {
                 Ok(tx_result) => {
-                    let tx_data = tx_result.tx_data.clone(); // Extract tx_data from TxResult
-                    self.omni_durability.append_tx(tx_result.tx_offset.clone(), tx_data);
+                    println!("tx_data is {:?}", tx_result.tx_data.clone());
+                    self.omni_durability.append_tx(tx_result.tx_offset.clone(), tx_result.tx_data.clone());
                     Ok(tx_result)
                 }
                 Err(err) => Err(err),
@@ -207,9 +215,8 @@ impl Node {
     fn advance_replicated_durability_offset(
         &self,
     ) -> Result<(), crate::datastore::error::DatastoreError> {
-        // advance the replicated durability offset
-
         let tx_offset = self.omni_durability.get_durable_tx_offset();
+        // println!("tx_offset: {:?}", tx_offset);
         self.data_store
             .advance_replicated_durability_offset(tx_offset)
     }
@@ -319,8 +326,6 @@ mod tests {
         let mut runtime = create_runtime();
         let nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
 
-        println!("Number of nodes: {}", nodes.len());
-
         runtime.block_on(async {
             tokio::time::sleep(Duration::from_secs(1)).await;
         });
@@ -350,7 +355,7 @@ mod tests {
         let tx_res = leader_node.commit_mut_tx(mut_tx);
 
         runtime.block_on(async {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
         });
 
         // Verify the committed data
@@ -363,15 +368,17 @@ mod tests {
             println!("Transaction result is None.");
         }
 
+        let vals = leader_node.omni_durability.omni_paxos.read_entries(..);
+        println!("Vals: {:?}", vals);
+
+        runtime.block_on(async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
         // Verify the committed data
         let (node_2, _) = nodes.get(&2).expect("Node not found");
         {
             let node_2 = node_2.lock().unwrap();
-
-            runtime.block_on(async {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            });
-
             let tx = node_2.begin_tx(DurabilityLevel::Replicated);
             let res = tx.get(&"test".to_string());
             if let Some(value) = res {

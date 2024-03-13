@@ -1,3 +1,6 @@
+use std::thread;
+use std::time::Duration;
+
 use super::*;
 use crate::datastore::{tx_data::TxData, TxOffset};
 use omnipaxos::macros::Entry;
@@ -78,9 +81,16 @@ impl DurabilityLayer for OmniPaxosDurability {
     fn append_tx(&mut self, tx_offset: TxOffset, tx_data: TxData) {
         // You need to implement this method based on your requirements.
         // It should append the given transaction to the Omnipaxos log.
-        self.omni_paxos
-            .append(Transaction { tx_offset, tx_data })
-            .expect("Failed to append transaction to Omnipaxos log");
+        match self.omni_paxos.append(Transaction {tx_offset, tx_data}) {
+            Ok(()) => {
+                println!("Transaction appended successfully");
+                let entries = self.omni_paxos.read_entries(..);
+                println!("Entries: {:?}", entries);
+            }
+            Err(err) => {
+                println!("Failed to append transaction: {:?}", err);
+            }
+        }
     }
 
     fn get_durable_tx_offset(&self) -> TxOffset {
