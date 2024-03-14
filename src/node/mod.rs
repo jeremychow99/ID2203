@@ -348,9 +348,8 @@ mod tests {
         runtime.shutdown_background();
     }
 
-    #[tokio::test]
-    async fn test_kill_node_elect_new() {
-        //setting up the runtime and nodes for operation
+    #[test]
+    fn test_kill_node_elect_new() {
         let mut runtime_env = create_runtime();
         let mut node_registry: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> =
             spawn_nodes(&mut runtime_env);
@@ -362,7 +361,6 @@ mod tests {
         let (specific_node, _) = node_registry.get(&1).expect("Node not located");
         //identify the leading node in the network
         let current_leader = specific_node
-
             .lock()
             .unwrap()
             .omni_durability
@@ -412,28 +410,34 @@ mod tests {
 
         let (active_node, _) = node_registry.get(live_nodes[0]).unwrap();
         let elected_leader = active_node
-
             .lock()
             .unwrap()
             .omni_durability
             .omni_paxos
             .get_current_leader()
             .unwrap();
-        println!("new leader id is: {:?}", new_leader);
-        assert_ne!(new_leader, leader);
+        println!("elected leader node {:?}", elected_leader);
+        assert_ne!(elected_leader, current_leader);
 
-        let (new_leader_node, _) = nodes.get(&new_leader).unwrap();
+        let (node_under_new_leadership, _) = node_registry.get(&elected_leader).unwrap();
 
-        // check that txn is replicated on new leader
-        let tx = new_leader_node
+        //verifying the transaction replication on the new leader's node
+        let replicated_tx = node_under_new_leadership
             .lock()
             .unwrap()
             .begin_tx(DurabilityLevel::Replicated);
 
-        println!("VALUE ON NEW LEADER {:?}", tx.get(&"test".to_string()));
-        assert_eq!(tx.get(&"test".to_string()), Some("testvalue".to_string()));
+        println!(
+            "TRANSACTION DATA ON NEW LEADER {:?}",
+            replicated_tx.get(&"test".to_string())
+        );
+        assert_eq!(
+            replicated_tx.get(&"test".to_string()),
+            Some("testvalue".to_string())
+        );
 
-        runtime.shutdown_background();
+        //shutting down the runtime environment
+        runtime_env.shutdown_background();
     }
 
     // fn test_3() {
