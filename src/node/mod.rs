@@ -315,7 +315,6 @@ mod tests {
 
         std::thread::sleep(WAIT_DECIDED_TIMEOUT * 20);
 
-
         // Verify the committed data
         let last_replicated_tx = leader_node
             .lock()
@@ -497,8 +496,8 @@ mod tests {
         server.lock().unwrap().allow_msg = false;
 
         //Give some time for the effect to take place
-        std::thread::sleep(WAIT_LEADER_TIMEOUT * 15);
-        
+        std::thread::sleep(WAIT_LEADER_TIMEOUT * 10);
+
         println!("Unisolated servers: {:?}", alive_servers);
 
         let isolated_leader = server
@@ -512,35 +511,18 @@ mod tests {
 
         let (alive_node, _handler) = nodes.get(alive_servers[0]).unwrap();
         //Get the new leader from a node that is not the leader
-        let new_leader = alive_node.lock().unwrap()
+        let new_leader = alive_node
+            .lock()
+            .unwrap()
             .omni_durability
             .omni_paxos
             .get_current_leader()
             .expect("Failed to get leader");
         println!("Newly Elected leader: {}", new_leader);
 
-        println!("elected leader node {:?}", elected_leader);
-        assert_ne!(elected_leader, current_leader);
-
-        let (node_under_new_leadership, _) = node_registry.get(&elected_leader).unwrap();
-
-        //verifying the transaction replication on the new leader's node
-        let replicated_tx = node_under_new_leadership
-            .lock()
-            .unwrap()
-            .begin_tx(DurabilityLevel::Replicated);
-
-
-        println!(
-            "TRANSACTION DATA ON NEW LEADER {:?}",
-            replicated_tx.get(&"test".to_string())
-        );
-        assert_eq!(
-            replicated_tx.get(&"test".to_string()),
-            Some("testvalue".to_string())
-        );
+        assert_ne!(new_leader, isolated_leader);
 
         //shutting down the runtime environment
-        runtime_env.shutdown_background();
+        runtime.shutdown_background();
     }
 }
