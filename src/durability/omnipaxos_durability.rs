@@ -1,3 +1,6 @@
+use std::thread;
+use std::time::Duration;
+
 use super::*;
 use crate::datastore::{tx_data::TxData, TxOffset};
 use omnipaxos::macros::Entry;
@@ -11,6 +14,12 @@ pub struct Transaction {
     tx_data: TxData,
 }
 
+impl Transaction {
+    pub fn new(tx_offset: TxOffset, tx_data: TxData) -> Self {
+        Transaction { tx_offset, tx_data }
+    }
+}
+
 type OmniPaxosStruct = OmniPaxos<Transaction, MemoryStorage<Transaction>>;
 
 /// OmniPaxosDurability is an OmniPaxos node that should provide the replicated
@@ -18,6 +27,12 @@ type OmniPaxosStruct = OmniPaxos<Transaction, MemoryStorage<Transaction>>;
 pub struct OmniPaxosDurability {
    pub omni_paxos: OmniPaxosStruct,
     // more traits
+}
+
+impl OmniPaxosDurability {
+    pub fn new(omni_paxos: OmniPaxos<Transaction, MemoryStorage<Transaction>>) -> Self {
+        OmniPaxosDurability { omni_paxos }
+    }
 }
 
 impl DurabilityLayer for OmniPaxosDurability {
@@ -30,7 +45,7 @@ impl DurabilityLayer for OmniPaxosDurability {
                 .flat_map(|log_entry| {
                     match log_entry {
                         LogEntry::Decided(decided_entry) => Some(decided_entry),
-                        LogEntry::Undecided(_undecided_entry) => None,
+                        LogEntry::Undecided(_undecided_entry) => Some(_undecided_entry),
                         LogEntry::Snapshotted(SnapshottedEntry { .. }) => {None}
                         LogEntry::Trimmed(_) | LogEntry::StopSign(_, _) => None,
 }
@@ -78,9 +93,17 @@ impl DurabilityLayer for OmniPaxosDurability {
     fn append_tx(&mut self, tx_offset: TxOffset, tx_data: TxData) {
         // You need to implement this method based on your requirements.
         // It should append the given transaction to the Omnipaxos log.
-        self.omni_paxos
-            .append(Transaction { tx_offset, tx_data })
-            .expect("Failed to append transaction to Omnipaxos log");
+        let log_entry = Transaction::new(tx_offset, tx_data);
+        match self.omni_paxos.append(log_entry) {
+            Ok(()) => {
+                println!("Transaction appended successfully");
+                let entries = self.omni_paxos.read_entries(..);
+                println!("Entries: {:?}", entries);
+            }
+            Err(err) => {
+                println!("Failed to append transaction: {:?}", err);
+            }
+        }
     }
 
     fn get_durable_tx_offset(&self) -> TxOffset {

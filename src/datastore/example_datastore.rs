@@ -18,9 +18,9 @@ type SharedWriteGuard<T> = ArcRwLockWriteGuard<RawRwLock, T>;
 type SharedReadGuard<T> = ArcRwLockReadGuard<RawRwLock, T>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ExampleRow {
-    key: String,
-    value: String,
+pub struct ExampleRow {
+    pub key: String,
+    pub value: String,
 }
 
 use std::io::{self, Read, Write};
@@ -40,7 +40,7 @@ fn serialize_example_row(row: &ExampleRow) -> io::Result<Vec<u8>> {
 }
 
 // Deserialize an ExampleRow from a slice of bytes
-fn deserialize_example_row(bytes: &[u8]) -> io::Result<ExampleRow> {
+pub fn deserialize_example_row(bytes: &[u8]) -> io::Result<ExampleRow> {
     let mut cursor = io::Cursor::new(bytes);
 
     // Deserialize `key`
