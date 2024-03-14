@@ -47,14 +47,9 @@ impl NodeRunner {
             let receiver = msg.get_receiver();
 
             let channel = self.outgoing.get_mut(&receiver).expect("No channels");
-            if !self
-                .node
-                .lock()
-                .unwrap()
-                .disconnected_nodes
-                .contains(&receiver)
-            {
-                let _res = channel.send(msg).await;
+            if self.node.lock().unwrap().connected_nodes[receiver as usize - 1] == true {
+                let channel = self.outgoing.get_mut(&receiver).expect("No channel");
+                let _ = channel.send(msg).await;
             }
         }
     }
@@ -74,7 +69,9 @@ impl NodeRunner {
                     self.node.lock().unwrap().omni_durability.omni_paxos.tick();
                 },
                 _ = outgoing_interval.tick() => {
-                    self.send_outgoing_msgs().await;
+                    if self.node.lock().unwrap().allow_msg {
+                        self.send_outgoing_msgs().await;
+                    }
                 },
                 _ = update_db_tick_interval.tick() => {
                     let current_leader = self.node.lock().unwrap().omni_durability.omni_paxos.get_current_leader();
@@ -87,7 +84,9 @@ impl NodeRunner {
                 },
                 Some(msg) = self.incoming.recv() => {
                     let receiver = msg.get_receiver();
-                    self.node.lock().unwrap().omni_durability.omni_paxos.handle_incoming(msg);
+                    if self.node.lock().unwrap().allow_msg {
+                    self.node.lock().unwrap().omni_durability.omni_paxos.handle_incoming(msg)
+                    };
                 }
             }
         }
@@ -98,7 +97,8 @@ pub struct Node {
     node_id: NodeId,
     pub omni_durability: OmniPaxosDurability,
     data_store: ExampleDatastore,
-    disconnected_nodes: Vec<NodeId>,
+    allow_msg: bool,
+    connected_nodes: Vec<bool>,
 }
 
 impl Node {
@@ -106,7 +106,8 @@ impl Node {
         Node {
             node_id,
             omni_durability,
-            disconnected_nodes: vec![],
+            allow_msg: true,
+            connected_nodes: vec![true; 4],
             data_store: ExampleDatastore::new(),
         }
     }
@@ -131,7 +132,9 @@ impl Node {
         // apply replicated transactions if follower
         self.advance_replicated_durability_offset().unwrap();
         let current_tx_offset = self.omni_durability.get_durable_tx_offset();
-        let mut txns = self.omni_durability.iter_starting_from_offset(current_tx_offset);
+        let mut txns = self
+            .omni_durability
+            .iter_starting_from_offset(current_tx_offset);
         while let Some((_tx_offset, tx_data)) = txns.next() {
             if let Err(err) = self.data_store.replay_transaction(&tx_data) {
                 // println!("Error: {}", err);
@@ -213,7 +216,7 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
 
-    const SERVERS: [NodeId; 3] = [1, 2, 3];
+    const SERVERS: [NodeId; 4] = [1, 2, 3, 4];
 
     #[allow(clippy::type_complexity)]
     fn initialise_channels() -> (
@@ -341,9 +344,8 @@ mod tests {
             }
         };
 
-        assert_eq!(nodes.len(), 3); // Ensure the expected number of nodes
+        assert_eq!(nodes.len(), 4); // Ensure the expected number of nodes
         runtime.shutdown_background();
-
     }
 
     #[tokio::test]
@@ -377,10 +379,12 @@ mod tests {
             .append_tx(tx_res.tx_offset, tx_res.tx_data);
 
         std::thread::sleep(WAIT_DECIDED_TIMEOUT * 15);
+
         let last_tx = leader_node
             .lock()
             .unwrap()
             .begin_tx(DurabilityLevel::Replicated);
+
         // check that transaction replicated in leader
         assert_eq!(
             last_tx.get(&"test".to_string()),
@@ -396,8 +400,8 @@ mod tests {
         std::thread::sleep(WAIT_DECIDED_TIMEOUT * 10);
 
         let alive_servers: Vec<&u64> = SERVERS.iter().filter(|&&id| id != leader).collect();
-        println!("node killed {:?}", leader);
-        println!("alive servers: {:?}", alive_servers);
+        println!("node killed: {:?}", leader);
+        println!("alive servers are: {:?}", alive_servers);
 
         let (alive_node, _handler) = nodes.get(alive_servers[0]).unwrap();
         let new_leader = alive_node
@@ -407,7 +411,7 @@ mod tests {
             .omni_paxos
             .get_current_leader()
             .unwrap();
-        println!("new leader id {:?}", new_leader);
+        println!("new leader id is: {:?}", new_leader);
         assert_ne!(new_leader, leader);
 
         let (new_leader_node, _) = nodes.get(&new_leader).unwrap();
@@ -423,30 +427,85 @@ mod tests {
 
         runtime.shutdown_background();
     }
-    fn test_3() {
+
+    // fn test_3() {
+    //     let mut runtime = create_runtime();
+    //     let mut nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
+    //     std::thread::sleep(WAIT_LEADER_TIMEOUT);
+    //     let (node, _) = nodes.get(&1).expect("Node not found");
+    //     // get leader node
+    //     let leader = node
+    //         .lock()
+    //         .unwrap()
+    //         .omni_durability
+    //         .omni_paxos
+    //         .get_current_leader()
+    //         .expect("No leader elected");
+
+    //     let (leader_node, leader_handle) = nodes.get(&leader).unwrap();
+
+    //     std::thread::sleep(WAIT_DECIDED_TIMEOUT * 2);
+    //     let _removed:Vec<()> = nodes.iter().map(|(node_id, _)| leader_node.lock().unwrap().remove_node(*node_id)).collect();
+
+    //     std::thread::sleep(Duration::from_secs(2));
+    //     let alive_servers:Vec<&u64> = SERVERS.iter().filter(|&&id| id != leader).collect();
+    //     let (alive_server, handler) = nodes.get(alive_servers[0]).unwrap();
+
+    // }
+
+    #[test]
+    fn test_constrained_election() {
         let mut runtime = create_runtime();
-        let mut nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
-        std::thread::sleep(WAIT_LEADER_TIMEOUT);
-        let (node, _) = nodes.get(&1).expect("Node not found");
-        // get leader node
-        let leader = node
+        let nodes = spawn_nodes(&mut runtime);
+        std::thread::sleep(WAIT_LEADER_TIMEOUT * 5);
+        let (node_1, _) = nodes.get(&1).unwrap();
+
+        let leader = node_1
             .lock()
             .unwrap()
             .omni_durability
             .omni_paxos
             .get_current_leader()
-            .expect("No leader elected");
+            .expect("Failed to get leader");
 
-        let (leader_node, leader_handle) = nodes.get(&leader).unwrap();
+        println!("Nodes: {:?}", SERVERS);
+        println!("Leader: {}", leader);
+
+        for node_id in SERVERS {
+            if node_id != leader {
+                let (node, _) = nodes.get(&node_id).unwrap();
+                // remove the leader from the connected nodes
+                node.lock().unwrap().connected_nodes[leader as usize - 1] = false
+            }
+        }
+        std::thread::sleep(WAIT_LEADER_TIMEOUT * 2);
+        let alive_servers: Vec<&u64> = SERVERS.iter().filter(|&&id| id != leader).collect();
+        let (server, _) = nodes.get(&leader).unwrap();
+        // stop messages from being sent
+        server.lock().unwrap().allow_msg = false;
+
+        //Give some time for the effect to take place
+        std::thread::sleep(WAIT_LEADER_TIMEOUT * 15);
         
-        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 2);
-        let _removed:Vec<()> = nodes.iter().map(|(node_id, _)| leader_node.lock().unwrap().remove_node(*node_id)).collect();
+        println!("Unisolated servers: {:?}", alive_servers);
 
-        std::thread::sleep(Duration::from_secs(2));
-        let alive_servers:Vec<&u64> = SERVERS.iter().filter(|&&id| id != leader).collect();
-        let (alive_server, handler) = nodes.get(alive_servers[0]).unwrap();
+        let isolated_leader = server
+            .lock()
+            .unwrap()
+            .omni_durability
+            .omni_paxos
+            .get_current_leader()
+            .expect("Failed to get leader");
+        println!("Old Isolated leader: {}", isolated_leader);
 
-         
+        let (alive_node, _handler) = nodes.get(alive_servers[0]).unwrap();
+        //Get the new leader from a node that is not the leader
+        let new_leader = alive_node.lock().unwrap()
+            .omni_durability
+            .omni_paxos
+            .get_current_leader()
+            .expect("Failed to get leader");
+        println!("Newly Elected leader: {}", new_leader);
 
     }
 }
