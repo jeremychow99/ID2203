@@ -346,8 +346,8 @@ mod tests {
 
     }
 
-    #[tokio::test]
-    async fn test_kill_node_elect_new() {
+    #[test]
+    fn test_kill_node_elect_new() {
         let mut runtime = create_runtime();
         let mut nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
 
@@ -423,10 +423,11 @@ mod tests {
 
         runtime.shutdown_background();
     }
+    [#test]
     fn test_3() {
         let mut runtime = create_runtime();
         let mut nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
-        std::thread::sleep(WAIT_LEADER_TIMEOUT);
+        std::thread::sleep(WAIT_LEADER_TIMEOUT*4);
         let (node, _) = nodes.get(&1).expect("Node not found");
         // get leader node
         let leader = node
@@ -438,14 +439,67 @@ mod tests {
             .expect("No leader elected");
 
         let (leader_node, leader_handle) = nodes.get(&leader).unwrap();
-        
-        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 2);
-        let _removed:Vec<()> = nodes.iter().map(|(node_id, _)| leader_node.lock().unwrap().remove_node(*node_id)).collect();
+        let mut mut_tx = leader_node.lock().unwrap().begin_mut_tx().unwrap();
+        mut_tx.set("test3".to_string(), "testvalue3".to_string());
+        //kill leader without appending txn
+        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 5);
+        let _removed:Vec<()> = nodes
+                        .iter()
+                        .map(|(node_id, _)| leader_node
+                        .lock()
+                        .unwrap()
+                        .remove_node(*node_id))
+                        .collect();
 
         std::thread::sleep(Duration::from_secs(2));
-        let alive_servers:Vec<&u64> = SERVERS.iter().filter(|&&id| id != leader).collect();
+        let alive_servers:Vec<&u64> = SERVERS
+                .iter()
+                .filter(|&&id| id != leader)
+                .collect();
         let (alive_server, handler) = nodes.get(alive_servers[0]).unwrap();
 
+         let new_leader = alive_server
+            .lock()
+            .unwrap()
+            .omni_durability
+            .omni_paxos
+            .get_current_leader()
+            .unwrap();
+
+        println!("first leader {:?}", leader);
+        println!("new leader id {:?}", new_leader);
+        assert_ne!(new_leader, leader);
+        let (new_leader,_) = nodes.get(&new_leader).unwrap();
+        let _:Vec<()> = nodes
+                        .iter()
+                        .map(|(node_id, _)| alive_server
+                        .lock()
+                        .unwrap()
+                        .add_node(*node_id))
+                        .collect();
+        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 2);
+        let last_replicated_tx = new_leader
+        .lock()
+        .unwrap()
+        .begin_tx(DurabilityLevel::Replicated);
+
+        let last_commited_tx = new_leader
+        .lock()
+        .unwrap()
+        .begin_tx(DurabilityLevel::Memory);
+
+        println!("last in memory {:?}", last_commited_tx.get(&"test3".to_string()));
+        println!( "Last rep: {:?}", last_replicated_tx.get(&"test3".to_string()));
+        assert_eq!(
+            last_replicated_tx.get(&"test3".to_string()),
+            None
+        ); 
+        assert_eq!(
+            last_commited_tx.get(&"test3".to_string()),
+            None
+        ); 
+        runtime.shutdown_background();
+    }
          
 
     }
