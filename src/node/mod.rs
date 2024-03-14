@@ -285,7 +285,7 @@ mod tests {
             };
             let omnipaxos_config = OmniPaxosConfig {
                 server_config,
-                cluster_config
+                cluster_config,
             };
             let omni_paxos = omnipaxos_config.build(storage).unwrap();
             let omni_durability = OmniPaxosDurability::new(omni_paxos);
@@ -308,12 +308,10 @@ mod tests {
         nodes
     }
 
-
-#[tokio::test]    
-async fn test_spawn_nodes() {
+    #[tokio::test]
+    async fn test_spawn_nodes() {
         let mut runtime = create_runtime();
         let nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
-
 
         // Retrieve the node to test
         std::thread::sleep(WAIT_LEADER_TIMEOUT * 2);
@@ -334,7 +332,11 @@ async fn test_spawn_nodes() {
         let mut mut_tx = leader_node.lock().unwrap().begin_mut_tx().unwrap();
         mut_tx.set("test".to_string(), "testvalue".to_string());
         let tx_res = leader_node.lock().unwrap().commit_mut_tx(mut_tx).unwrap();
-        leader_node.lock().unwrap().omni_durability.append_tx(tx_res.tx_offset, tx_res.tx_data);
+        leader_node
+            .lock()
+            .unwrap()
+            .omni_durability
+            .append_tx(tx_res.tx_offset, tx_res.tx_data);
         std::thread::sleep(WAIT_DECIDED_TIMEOUT * 20);
 
         // Verify the committed data
@@ -342,7 +344,7 @@ async fn test_spawn_nodes() {
             .lock()
             .unwrap()
             .begin_tx(DurabilityLevel::Replicated);
-        
+
         let res = last_replicated_tx.get(&"test".to_string());
         if let Some(value) = res {
             println!("Transaction result: {}", value);
@@ -367,6 +369,97 @@ async fn test_spawn_nodes() {
 
         assert_eq!(nodes.len(), 3); // Ensure the expected number of nodes
         runtime.shutdown_background();
+    }
+    #[tokio::test]
+    async fn test_kill_node_elect_new() {
+        //setting up the runtime and nodes for operation
+        let mut runtime_env = create_runtime();
+        let mut node_registry: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> =
+            spawn_nodes(&mut runtime_env);
 
+        //delay to ensure leadership stabilization
+        std::thread::sleep(WAIT_LEADER_TIMEOUT * 5);
+
+        //retrieve a specific node, expected to exist
+        let (specific_node, _) = node_registry.get(&1).expect("Node not located");
+        //identify the leading node in the network
+        let current_leader = specific_node
+            .lock()
+            .unwrap()
+            .omni_durability
+            .omni_paxos
+            .get_current_leader()
+            .expect("Leader election failed");
+
+        //demonstrating data mutation and transaction commitment
+        let (leader_node_ref, _) = node_registry.get(&current_leader).unwrap();
+        let mut transaction = leader_node_ref.lock().unwrap().begin_mut_tx().unwrap();
+        transaction.set("test".to_string(), "testvalue".to_string());
+        let transaction_result = leader_node_ref
+            .lock()
+            .unwrap()
+            .commit_mut_tx(transaction)
+            .unwrap();
+
+        //logging the transaction
+        leader_node_ref
+            .lock()
+            .unwrap()
+            .omni_durability
+            .append_tx(transaction_result.tx_offset, transaction_result.tx_data);
+
+        //waiting for transaction consensus
+        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 15);
+        let retrieved_tx = leader_node_ref
+            .lock()
+            .unwrap()
+            .begin_tx(DurabilityLevel::Replicated);
+        //validating the replication of the transaction in the leader node
+        assert_eq!(
+            retrieved_tx.get(&"test".to_string()),
+            Some("testvalue".to_string())
+        );
+
+        //terminating the leader node to trigger re-election
+        node_registry.remove(&current_leader);
+
+        //waiting for the election of a new leader
+        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 25);
+
+        //determining the new leadership
+        let live_nodes: Vec<&u64> = SERVERS.iter().filter(|&&id| id != current_leader).collect();
+        println!("terminated node {:?}", current_leader);
+        println!("nodes still running: {:?}", live_nodes);
+
+        let (active_node, _) = node_registry.get(live_nodes[0]).unwrap();
+        let elected_leader = active_node
+            .lock()
+            .unwrap()
+            .omni_durability
+            .omni_paxos
+            .get_current_leader()
+            .unwrap();
+        println!("elected leader node {:?}", elected_leader);
+        assert_ne!(elected_leader, current_leader);
+
+        let (node_under_new_leadership, _) = node_registry.get(&elected_leader).unwrap();
+
+        //verifying the transaction replication on the new leader's node
+        let replicated_tx = node_under_new_leadership
+            .lock()
+            .unwrap()
+            .begin_tx(DurabilityLevel::Replicated);
+
+        println!(
+            "TRANSACTION DATA ON NEW LEADER {:?}",
+            replicated_tx.get(&"test".to_string())
+        );
+        assert_eq!(
+            replicated_tx.get(&"test".to_string()),
+            Some("testvalue".to_string())
+        );
+
+        //shutting down the runtime environment
+        runtime_env.shutdown_background();
     }
 }
