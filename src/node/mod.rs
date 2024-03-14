@@ -141,7 +141,7 @@ impl Node {
     }
 
     fn rollback_unreplicated_txns(&mut self) {
-        self.advance_replicated_durability_offset().unwrap();
+        // self.advance_replicated_durability_offset().unwrap();
         if let Err(err) = self.data_store.rollback_to_replicated_durability_offset() {
             println!("Error: {}", err);
         }
@@ -292,8 +292,8 @@ mod tests {
         nodes
     }
 
-    #[tokio::test]
-    async fn test_spawn_nodes() {
+    #[test]
+    fn test_spawn_nodes() {
         let mut runtime = create_runtime();
         let nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
 
@@ -434,6 +434,7 @@ mod tests {
 
         runtime.shutdown_background();
     }
+
     #[test]
     fn test_3() {
         let mut runtime = create_runtime();
