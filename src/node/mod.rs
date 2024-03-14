@@ -455,15 +455,17 @@ mod tests {
         let mut mut_tx = leader_node.lock().unwrap().begin_mut_tx().unwrap();
         mut_tx.set("test3".to_string(), "testvalue3".to_string());
         let tx_res = leader_node.lock().unwrap().commit_mut_tx(mut_tx).unwrap();
+        
+
+        //kill leader without appending txn
+        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 5);
+        leader_node.lock().unwrap().allow_msg = false;
+
         leader_node
             .lock()
             .unwrap()
             .omni_durability
             .append_tx(tx_res.tx_offset, tx_res.tx_data);
-
-        //kill leader without appending txn
-        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 5);
-        leader_node.allow_msg = false;
 
         std::thread::sleep(Duration::from_secs(2));
         let alive_servers:Vec<&u64> = SERVERS
@@ -484,7 +486,7 @@ mod tests {
         println!("new leader id {:?}", new_leader);
         assert_ne!(new_leader, leader);
         let (new_leader,_) = nodes.get(&new_leader).unwrap();
-        leader.allow_msg = true;
+        leader_node.lock().unwrap().allow_msg = true;
 
         std::thread::sleep(WAIT_DECIDED_TIMEOUT * 2);
         let last_replicated_tx = new_leader
