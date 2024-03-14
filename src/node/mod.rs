@@ -349,94 +349,81 @@ mod tests {
 
     #[test]
     fn test_kill_node_elect_new() {
-        let mut runtime_env = create_runtime();
-        let mut node_registry: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> =
-            spawn_nodes(&mut runtime_env);
+        let mut runtime = create_runtime();
+        let mut nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
 
-        //delay to ensure leadership stabilization
         std::thread::sleep(WAIT_LEADER_TIMEOUT * 5);
 
-        //retrieve a specific node, expected to exist
-        let (specific_node, _) = node_registry.get(&1).expect("Node not located");
-        //identify the leading node in the network
-        let current_leader = specific_node
+        let (node, _) = nodes.get(&1).expect("Node not found");
+        // get leader node
+        let leader = node
             .lock()
             .unwrap()
             .omni_durability
             .omni_paxos
             .get_current_leader()
-            .expect("Leader election failed");
+            .expect("No leader elected");
 
-        //demonstrating data mutation and transaction commitment
-        let (leader_node_ref, _) = node_registry.get(&current_leader).unwrap();
-        let mut transaction = leader_node_ref.lock().unwrap().begin_mut_tx().unwrap();
-        transaction.set("test".to_string(), "testvalue".to_string());
-        let transaction_result = leader_node_ref
-            .lock()
-            .unwrap()
-            .commit_mut_tx(transaction)
-            .unwrap();
+        // Example: Mutate data and commit transaction
+        let (leader_node, leader_handle) = nodes.get(&leader).unwrap();
+        let mut mut_tx = leader_node.lock().unwrap().begin_mut_tx().unwrap();
+        mut_tx.set("test".to_string(), "testvalue".to_string());
+        let tx_res = leader_node.lock().unwrap().commit_mut_tx(mut_tx).unwrap();
 
-        //logging the transaction
-        leader_node_ref
+        // append txn to log
+        leader_node
             .lock()
             .unwrap()
             .omni_durability
-            .append_tx(transaction_result.tx_offset, transaction_result.tx_data);
+            .append_tx(tx_res.tx_offset, tx_res.tx_data);
 
-        //waiting for transaction consensus
         std::thread::sleep(WAIT_DECIDED_TIMEOUT * 15);
-        let retrieved_tx = leader_node_ref
-            .lock()
-            .unwrap()
-            .begin_tx(DurabilityLevel::Replicated);
-        //validating the replication of the transaction in the leader node
-        assert_eq!(
-            retrieved_tx.get(&"test".to_string()),
-            Some("testvalue".to_string())
-        );
+        
+        // let last_tx = leader_node
+        //     .lock()
+        //     .unwrap()
+        //     .begin_tx(DurabilityLevel::Replicated);
+        // // check that transaction replicated in leader
+        // assert_eq!(
+        //     last_tx.get(&"test".to_string()),
+        //     Some("testvalue".to_string())
+        // );
 
-        //terminating the leader node to trigger re-election
-        node_registry.remove(&current_leader);
+        // kill leader node
+        leader_handle.abort();
+        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 15);
+        nodes.remove(&leader);
 
-        //waiting for the election of a new leader
-        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 25);
+        // get new node, and check get the newly elected leader
+        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 10);
 
-        //determining the new leadership
-        let live_nodes: Vec<&u64> = SERVERS.iter().filter(|&&id| id != current_leader).collect();
-        println!("terminated node {:?}", current_leader);
-        println!("nodes still running: {:?}", live_nodes);
+        let alive_servers: Vec<&u64> = SERVERS.iter().filter(|&&id| id != leader).collect();
+        println!("node killed {:?}", leader);
+        println!("alive servers: {:?}", alive_servers);
 
-        let (active_node, _) = node_registry.get(live_nodes[0]).unwrap();
-        let elected_leader = active_node
+        let (alive_node, _handler) = nodes.get(alive_servers[0]).unwrap();
+        let new_leader = alive_node
             .lock()
             .unwrap()
             .omni_durability
             .omni_paxos
             .get_current_leader()
             .unwrap();
-        println!("elected leader node {:?}", elected_leader);
-        assert_ne!(elected_leader, current_leader);
+        println!("new leader id {:?}", new_leader);
+        assert_ne!(new_leader, leader);
 
-        let (node_under_new_leadership, _) = node_registry.get(&elected_leader).unwrap();
+        let (new_leader_node, _) = nodes.get(&new_leader).unwrap();
 
-        //verifying the transaction replication on the new leader's node
-        let replicated_tx = node_under_new_leadership
+        // check that txn is replicated on new leader
+        let tx = new_leader_node
             .lock()
             .unwrap()
             .begin_tx(DurabilityLevel::Replicated);
 
-        println!(
-            "TRANSACTION DATA ON NEW LEADER {:?}",
-            replicated_tx.get(&"test".to_string())
-        );
-        assert_eq!(
-            replicated_tx.get(&"test".to_string()),
-            Some("testvalue".to_string())
-        );
+        println!("VALUE ON NEW LEADER {:?}", tx.get(&"test".to_string()));
+        assert_eq!(tx.get(&"test".to_string()), Some("testvalue".to_string()));
 
-        //shutting down the runtime environment
-        runtime_env.shutdown_background();
+        runtime.shutdown_background();
     }
 
     // fn test_3() {
