@@ -193,16 +193,16 @@ impl Node {
         self.data_store
             .advance_replicated_durability_offset(tx_offset)
     }
-    pub fn add_node(&mut self, node_id: NodeId) {
-        if !self.connected_nodes.contains(&node_id) {
-            self.connected_nodes.push(node_id);
-        }
-    }
-    pub fn remove_node(&mut self, node_id: NodeId) {
-        if self.connected_nodes.contains(&node_id) {
-            self.connected_nodes.retain(|&x| x != node_id);
-        }
-    }
+    // pub fn add_node(&mut self, node_id: NodeId) {
+    //     if !self.connected_nodes.contains(&node_id) {
+    //         self.connected_nodes.push(node_id);
+    //     }
+    // }
+    // pub fn remove_node(&mut self, node_id: NodeId) {
+    //     if self.connected_nodes.contains(&node_id) {
+    //         self.connected_nodes.retain(|&x| x != node_id);
+    //     }
+    // }
 
 }
 
@@ -451,7 +451,7 @@ mod tests {
             .get_current_leader()
             .expect("No leader elected");
 
-        let (leader_node, _leader_handle) = nodes.get(&leader).unwrap();
+        let (leader_node, leader_handle) = nodes.get(&leader).unwrap();
         let mut mut_tx = leader_node.lock().unwrap().begin_mut_tx().unwrap();
         mut_tx.set("test3".to_string(), "testvalue3".to_string());
         let tx_res = leader_node.lock().unwrap().commit_mut_tx(mut_tx).unwrap();
@@ -463,13 +463,7 @@ mod tests {
 
         //kill leader without appending txn
         std::thread::sleep(WAIT_DECIDED_TIMEOUT * 5);
-        let _removed:Vec<()> = nodes
-                        .iter()
-                        .map(|(node_id, _)| leader_node
-                        .lock()
-                        .unwrap()
-                        .remove_node(*node_id))
-                        .collect();
+        leader_node.allow_msg = false;
 
         std::thread::sleep(Duration::from_secs(2));
         let alive_servers:Vec<&u64> = SERVERS
@@ -490,13 +484,8 @@ mod tests {
         println!("new leader id {:?}", new_leader);
         assert_ne!(new_leader, leader);
         let (new_leader,_) = nodes.get(&new_leader).unwrap();
-        let _:Vec<()> = nodes
-                        .iter()
-                        .map(|(node_id, _)| alive_server
-                        .lock()
-                        .unwrap()
-                        .add_node(*node_id))
-                        .collect();
+        leader.allow_msg = true;
+
         std::thread::sleep(WAIT_DECIDED_TIMEOUT * 2);
         let last_replicated_tx = new_leader
         .lock()
