@@ -423,4 +423,30 @@ mod tests {
 
         runtime.shutdown_background();
     }
+    fn test_3() {
+        let mut runtime = create_runtime();
+        let mut nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
+        std::thread::sleep(WAIT_LEADER_TIMEOUT);
+        let (node, _) = nodes.get(&1).expect("Node not found");
+        // get leader node
+        let leader = node
+            .lock()
+            .unwrap()
+            .omni_durability
+            .omni_paxos
+            .get_current_leader()
+            .expect("No leader elected");
+
+        let (leader_node, leader_handle) = nodes.get(&leader).unwrap();
+        
+        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 2);
+        let _removed:Vec<()> = nodes.iter().map(|(node_id, _)| leader_node.lock().unwrap().remove_node(*node_id)).collect();
+
+        std::thread::sleep(Duration::from_secs(2));
+        let alive_servers:Vec<&u64> = SERVERS.iter().filter(|&&id| id != leader).collect();
+        let (alive_server, handler) = nodes.get(alive_servers[0]).unwrap();
+
+         
+
+    }
 }
