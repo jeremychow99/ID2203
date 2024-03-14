@@ -193,6 +193,17 @@ impl Node {
         self.data_store
             .advance_replicated_durability_offset(tx_offset)
     }
+    pub fn add_node(&mut self, node_id: NodeId) {
+        if !self.connected_nodes.contains(&node_id) {
+            self.connected_nodes.push(node_id);
+        }
+    }
+    pub fn remove_node(&mut self, node_id: NodeId) {
+        if self.connected_nodes.contains(&node_id) {
+            self.connected_nodes.retain(|&x| x != node_id);
+        }
+    }
+
 }
 
 /// Your test cases should spawn up multiple nodes in tokio and cover the following:
