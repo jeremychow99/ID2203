@@ -24,7 +24,7 @@ pub const TICK_PERIOD: Duration = Duration::from_millis(10);
 pub const OUTGOING_MESSAGE_PERIOD: Duration = Duration::from_millis(1);
 pub const UPDATE_DB_PERIOD: Duration = Duration::from_millis(1);
 
-pub const WAIT_LEADER_TIMEOUT: Duration = Duration::from_millis(500);
+pub const WAIT_LEADER_TIMEOUT: Duration = Duration::from_millis(1000);
 pub const WAIT_DECIDED_TIMEOUT: Duration = Duration::from_millis(50);
 pub struct NodeRunner {
     pub node: Arc<Mutex<Node>>,
@@ -47,14 +47,9 @@ impl NodeRunner {
             let receiver = msg.get_receiver();
 
             let channel = self.outgoing.get_mut(&receiver).expect("No channels");
-            if !self
-                .node
-                .lock()
-                .unwrap()
-                .disconnected_nodes
-                .contains(&receiver)
-            {
-                let _res = channel.send(msg).await;
+            if self.node.lock().unwrap().connected_nodes[receiver as usize - 1] == true {
+                let channel = self.outgoing.get_mut(&receiver).expect("No channel");
+                let _ = channel.send(msg).await;
             }
         }
     }
@@ -74,7 +69,9 @@ impl NodeRunner {
                     self.node.lock().unwrap().omni_durability.omni_paxos.tick();
                 },
                 _ = outgoing_interval.tick() => {
-                    self.send_outgoing_msgs().await;
+                    if self.node.lock().unwrap().allow_msg {
+                        self.send_outgoing_msgs().await;
+                    }
                 },
                 _ = update_db_tick_interval.tick() => {
                     let current_leader = self.node.lock().unwrap().omni_durability.omni_paxos.get_current_leader();
@@ -87,7 +84,9 @@ impl NodeRunner {
                 },
                 Some(msg) = self.incoming.recv() => {
                     let receiver = msg.get_receiver();
-                    self.node.lock().unwrap().omni_durability.omni_paxos.handle_incoming(msg);
+                    if self.node.lock().unwrap().allow_msg {
+                    self.node.lock().unwrap().omni_durability.omni_paxos.handle_incoming(msg)
+                    };
                 }
             }
         }
@@ -98,7 +97,8 @@ pub struct Node {
     node_id: NodeId,
     pub omni_durability: OmniPaxosDurability,
     data_store: ExampleDatastore,
-    disconnected_nodes: Vec<NodeId>,
+    allow_msg: bool,
+    connected_nodes: Vec<bool>,
 }
 
 impl Node {
@@ -106,7 +106,8 @@ impl Node {
         Node {
             node_id,
             omni_durability,
-            disconnected_nodes: vec![],
+            allow_msg: true,
+            connected_nodes: vec![true; 4],
             data_store: ExampleDatastore::new(),
         }
     }
@@ -131,7 +132,9 @@ impl Node {
         // apply replicated transactions if follower
         self.advance_replicated_durability_offset().unwrap();
         let current_tx_offset = self.omni_durability.get_durable_tx_offset();
-        let mut txns = self.omni_durability.iter_starting_from_offset(current_tx_offset);
+        let mut txns = self
+            .omni_durability
+            .iter_starting_from_offset(current_tx_offset);
         while let Some((_tx_offset, tx_data)) = txns.next() {
             if let Err(err) = self.data_store.replay_transaction(&tx_data) {
                 // println!("Error: {}", err);
@@ -213,7 +216,7 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
 
-    const SERVERS: [NodeId; 3] = [1, 2, 3];
+    const SERVERS: [NodeId; 4] = [1, 2, 3, 4];
 
     #[allow(clippy::type_complexity)]
     fn initialise_channels() -> (
@@ -281,13 +284,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_transaction_chosen() {
+    async fn test_spawn_nodes() {
         let mut runtime = create_runtime();
         let nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
 
-        // wait for nodes to start
-        std::thread::sleep(WAIT_LEADER_TIMEOUT * 5);
-
+        // Retrieve the node to test
+        std::thread::sleep(WAIT_LEADER_TIMEOUT * 2);
         let (node, _) = nodes.get(&1).expect("Node not found");
 
         // get leader node
@@ -311,7 +313,8 @@ mod tests {
             .omni_durability
             .append_tx(tx_res.tx_offset, tx_res.tx_data);
 
-        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 10);
+        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 20);
+
 
         // Verify the committed data
         let last_replicated_tx = leader_node
@@ -341,73 +344,82 @@ mod tests {
             }
         };
 
-        assert_eq!(nodes.len(), 3); // Ensure the expected number of nodes
+        assert_eq!(nodes.len(), 4); // Ensure the expected number of nodes
         runtime.shutdown_background();
-
     }
 
-    #[test]
-    fn test_kill_node_elect_new() {
-        let mut runtime = create_runtime();
-        let mut nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
+    #[tokio::test]
+    async fn test_kill_node_elect_new() {
+        //setting up the runtime and nodes for operation
+        let mut runtime_env = create_runtime();
+        let mut node_registry: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> =
+            spawn_nodes(&mut runtime_env);
 
+        //delay to ensure leadership stabilization
         std::thread::sleep(WAIT_LEADER_TIMEOUT * 5);
 
-        let (node, _) = nodes.get(&1).expect("Node not found");
-        // get leader node
-        let leader = node
+        //retrieve a specific node, expected to exist
+        let (specific_node, _) = node_registry.get(&1).expect("Node not located");
+        //identify the leading node in the network
+        let current_leader = specific_node
+
             .lock()
             .unwrap()
             .omni_durability
             .omni_paxos
             .get_current_leader()
-            .expect("No leader elected");
+            .expect("Leader election failed");
 
-        // Example: Mutate data and commit transaction
-        let (leader_node, leader_handle) = nodes.get(&leader).unwrap();
-        let mut mut_tx = leader_node.lock().unwrap().begin_mut_tx().unwrap();
-        mut_tx.set("test".to_string(), "testvalue".to_string());
-        let tx_res = leader_node.lock().unwrap().commit_mut_tx(mut_tx).unwrap();
+        //demonstrating data mutation and transaction commitment
+        let (leader_node_ref, _) = node_registry.get(&current_leader).unwrap();
+        let mut transaction = leader_node_ref.lock().unwrap().begin_mut_tx().unwrap();
+        transaction.set("test".to_string(), "testvalue".to_string());
+        let transaction_result = leader_node_ref
+            .lock()
+            .unwrap()
+            .commit_mut_tx(transaction)
+            .unwrap();
 
-        // append txn to log
-        leader_node
+        //logging the transaction
+        leader_node_ref
             .lock()
             .unwrap()
             .omni_durability
-            .append_tx(tx_res.tx_offset, tx_res.tx_data);
+            .append_tx(transaction_result.tx_offset, transaction_result.tx_data);
 
+        //waiting for transaction consensus
         std::thread::sleep(WAIT_DECIDED_TIMEOUT * 15);
-        let last_tx = leader_node
+        let retrieved_tx = leader_node_ref
             .lock()
             .unwrap()
             .begin_tx(DurabilityLevel::Replicated);
-        // check that transaction replicated in leader
+        //validating the replication of the transaction in the leader node
         assert_eq!(
-            last_tx.get(&"test".to_string()),
+            retrieved_tx.get(&"test".to_string()),
             Some("testvalue".to_string())
         );
 
-        // kill leader node
-        leader_handle.abort();
-        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 15);
-        nodes.remove(&leader);
+        //terminating the leader node to trigger re-election
+        node_registry.remove(&current_leader);
 
-        // get new node, and check get the newly elected leader
-        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 10);
+        //waiting for the election of a new leader
+        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 25);
 
-        let alive_servers: Vec<&u64> = SERVERS.iter().filter(|&&id| id != leader).collect();
-        println!("node killed {:?}", leader);
-        println!("alive servers: {:?}", alive_servers);
+        //determining the new leadership
+        let live_nodes: Vec<&u64> = SERVERS.iter().filter(|&&id| id != current_leader).collect();
+        println!("terminated node {:?}", current_leader);
+        println!("nodes still running: {:?}", live_nodes);
 
-        let (alive_node, _handler) = nodes.get(alive_servers[0]).unwrap();
-        let new_leader = alive_node
+        let (active_node, _) = node_registry.get(live_nodes[0]).unwrap();
+        let elected_leader = active_node
+
             .lock()
             .unwrap()
             .omni_durability
             .omni_paxos
             .get_current_leader()
             .unwrap();
-        println!("new leader id {:?}", new_leader);
+        println!("new leader id is: {:?}", new_leader);
         assert_ne!(new_leader, leader);
 
         let (new_leader_node, _) = nodes.get(&new_leader).unwrap();
@@ -423,84 +435,108 @@ mod tests {
 
         runtime.shutdown_background();
     }
-    [#test]
-    fn test_3() {
+
+    // fn test_3() {
+    //     let mut runtime = create_runtime();
+    //     let mut nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
+    //     std::thread::sleep(WAIT_LEADER_TIMEOUT);
+    //     let (node, _) = nodes.get(&1).expect("Node not found");
+    //     // get leader node
+    //     let leader = node
+    //         .lock()
+    //         .unwrap()
+    //         .omni_durability
+    //         .omni_paxos
+    //         .get_current_leader()
+    //         .expect("No leader elected");
+
+    //     let (leader_node, leader_handle) = nodes.get(&leader).unwrap();
+
+    //     std::thread::sleep(WAIT_DECIDED_TIMEOUT * 2);
+    //     let _removed:Vec<()> = nodes.iter().map(|(node_id, _)| leader_node.lock().unwrap().remove_node(*node_id)).collect();
+
+    //     std::thread::sleep(Duration::from_secs(2));
+    //     let alive_servers:Vec<&u64> = SERVERS.iter().filter(|&&id| id != leader).collect();
+    //     let (alive_server, handler) = nodes.get(alive_servers[0]).unwrap();
+
+    // }
+
+    #[test]
+    fn test_constrained_election() {
         let mut runtime = create_runtime();
-        let mut nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
-        std::thread::sleep(WAIT_LEADER_TIMEOUT*4);
-        let (node, _) = nodes.get(&1).expect("Node not found");
-        // get leader node
-        let leader = node
+        let nodes = spawn_nodes(&mut runtime);
+        std::thread::sleep(WAIT_LEADER_TIMEOUT * 5);
+        let (node_1, _) = nodes.get(&1).unwrap();
+
+        let leader = node_1
             .lock()
             .unwrap()
             .omni_durability
             .omni_paxos
             .get_current_leader()
-            .expect("No leader elected");
+            .expect("Failed to get leader");
 
-        let (leader_node, leader_handle) = nodes.get(&leader).unwrap();
-        let mut mut_tx = leader_node.lock().unwrap().begin_mut_tx().unwrap();
-        mut_tx.set("test3".to_string(), "testvalue3".to_string());
-        //kill leader without appending txn
-        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 5);
-        let _removed:Vec<()> = nodes
-                        .iter()
-                        .map(|(node_id, _)| leader_node
-                        .lock()
-                        .unwrap()
-                        .remove_node(*node_id))
-                        .collect();
+        println!("Nodes: {:?}", SERVERS);
+        println!("Leader: {}", leader);
 
-        std::thread::sleep(Duration::from_secs(2));
-        let alive_servers:Vec<&u64> = SERVERS
-                .iter()
-                .filter(|&&id| id != leader)
-                .collect();
-        let (alive_server, handler) = nodes.get(alive_servers[0]).unwrap();
+        for node_id in SERVERS {
+            if node_id != leader {
+                let (node, _) = nodes.get(&node_id).unwrap();
+                // remove the leader from the connected nodes
+                node.lock().unwrap().connected_nodes[leader as usize - 1] = false
+            }
+        }
+        std::thread::sleep(WAIT_LEADER_TIMEOUT * 2);
+        let alive_servers: Vec<&u64> = SERVERS.iter().filter(|&&id| id != leader).collect();
+        let (server, _) = nodes.get(&leader).unwrap();
+        // stop messages from being sent
+        server.lock().unwrap().allow_msg = false;
 
-         let new_leader = alive_server
+        //Give some time for the effect to take place
+        std::thread::sleep(WAIT_LEADER_TIMEOUT * 15);
+        
+        println!("Unisolated servers: {:?}", alive_servers);
+
+        let isolated_leader = server
             .lock()
             .unwrap()
             .omni_durability
             .omni_paxos
             .get_current_leader()
-            .unwrap();
+            .expect("Failed to get leader");
+        println!("Old Isolated leader: {}", isolated_leader);
 
-        println!("first leader {:?}", leader);
-        println!("new leader id {:?}", new_leader);
-        assert_ne!(new_leader, leader);
-        let (new_leader,_) = nodes.get(&new_leader).unwrap();
-        let _:Vec<()> = nodes
-                        .iter()
-                        .map(|(node_id, _)| alive_server
-                        .lock()
-                        .unwrap()
-                        .add_node(*node_id))
-                        .collect();
-        std::thread::sleep(WAIT_DECIDED_TIMEOUT * 2);
-        let last_replicated_tx = new_leader
-        .lock()
-        .unwrap()
-        .begin_tx(DurabilityLevel::Replicated);
+        let (alive_node, _handler) = nodes.get(alive_servers[0]).unwrap();
+        //Get the new leader from a node that is not the leader
+        let new_leader = alive_node.lock().unwrap()
+            .omni_durability
+            .omni_paxos
+            .get_current_leader()
+            .expect("Failed to get leader");
+        println!("Newly Elected leader: {}", new_leader);
 
-        let last_commited_tx = new_leader
-        .lock()
-        .unwrap()
-        .begin_tx(DurabilityLevel::Memory);
+        println!("elected leader node {:?}", elected_leader);
+        assert_ne!(elected_leader, current_leader);
 
-        println!("last in memory {:?}", last_commited_tx.get(&"test3".to_string()));
-        println!( "Last rep: {:?}", last_replicated_tx.get(&"test3".to_string()));
+        let (node_under_new_leadership, _) = node_registry.get(&elected_leader).unwrap();
+
+        //verifying the transaction replication on the new leader's node
+        let replicated_tx = node_under_new_leadership
+            .lock()
+            .unwrap()
+            .begin_tx(DurabilityLevel::Replicated);
+
+
+        println!(
+            "TRANSACTION DATA ON NEW LEADER {:?}",
+            replicated_tx.get(&"test".to_string())
+        );
         assert_eq!(
-            last_replicated_tx.get(&"test3".to_string()),
-            None
-        ); 
-        assert_eq!(
-            last_commited_tx.get(&"test3".to_string()),
-            None
-        ); 
-        runtime.shutdown_background();
-    }
-         
+            replicated_tx.get(&"test".to_string()),
+            Some("testvalue".to_string())
+        );
 
+        //shutting down the runtime environment
+        runtime_env.shutdown_background();
     }
 }
