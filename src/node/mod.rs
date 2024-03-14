@@ -15,8 +15,6 @@ use tokio::time::{self, sleep};
 
 use crate::durability::omnipaxos_durability::Transaction;
 
-use self::example_datastore::Tx;
-use self::tx_data::DeleteList;
 
 pub const BUFFER_SIZE: usize = 10000;
 pub const ELECTION_TICK_TIMEOUT: u64 = 5;
@@ -555,6 +553,7 @@ mod tests {
             .omni_paxos
             .get_current_leader()
             .expect("Failed to get leader");
+
         println!("Old Isolated leader: {}", isolated_leader);
 
         let (alive_node, _handler) = nodes.get(alive_servers[0]).unwrap();
@@ -572,5 +571,38 @@ mod tests {
 
         //shutting down the runtime environment
         runtime.shutdown_background();
+    }
+
+    #[test]
+    fn test_quorum_loss() {
+        let mut runtime = create_runtime();
+        let nodes = spawn_nodes(&mut runtime);
+        std::thread::sleep(WAIT_LEADER_TIMEOUT * 4);
+        let (node_1, _) = nodes.get(&1).unwrap();
+        let leader = node_1.lock()
+            .unwrap()
+            .omni_durability.omni_paxos
+            .get_current_leader()
+            .expect("Failed to get leader");
+
+        println!("Current leader: {}", leader);
+
+        let to_be_elected: u64 = 1;
+        for node_id in SERVERS {
+            // disconnect all other nodes so that only our new_leader will have quorum
+            if node_id != to_be_elected {
+                let (server_to_get, _) = nodes.get(&node_id).unwrap();
+                for pid in SERVERS{
+                    if pid != to_be_elected{
+                        server_to_get.lock().unwrap().connected_nodes[pid as usize-1] = false;
+                    }
+                }
+            }    
+        }
+
+        std::thread::sleep(WAIT_LEADER_TIMEOUT * 5);
+        let new_leader = nodes.get(&to_be_elected).unwrap().0.lock().unwrap().omni_durability.omni_paxos.get_current_leader().expect("Failed to get leader");
+        println!("Newly elected leader {:?}", new_leader);
+
     }
 }
