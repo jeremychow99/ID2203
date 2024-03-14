@@ -293,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn test_spawn_nodes() {
+    fn test_transaction_is_chosen() {
         let mut runtime = create_runtime();
         let nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
 
@@ -436,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn test_3() {
+    fn test_rollback_when_disconnect() {
         let mut runtime = create_runtime();
         let nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);    
         std::thread::sleep(WAIT_LEADER_TIMEOUT*4);
@@ -512,6 +512,7 @@ mod tests {
     }
 
     #[test]
+    
     fn test_constrained_election() {
         let mut runtime = create_runtime();
         let nodes = spawn_nodes(&mut runtime);
