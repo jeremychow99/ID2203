@@ -25,7 +25,7 @@ type OmniPaxosStruct = OmniPaxos<Transaction, MemoryStorage<Transaction>>;
 /// OmniPaxosDurability is an OmniPaxos node that should provide the replicated
 /// implementation of the DurabilityLayer trait required by the Datastore.
 pub struct OmniPaxosDurability {
-   pub omni_paxos: OmniPaxosStruct,
+    pub omni_paxos: OmniPaxosStruct,
     // more traits
 }
 
@@ -37,29 +37,14 @@ impl OmniPaxosDurability {
 
 impl DurabilityLayer for OmniPaxosDurability {
     fn iter(&self) -> Box<dyn Iterator<Item = (TxOffset, TxData)>> {
-        // You need to implement this method based on your requirements.
-        // It should return an iterator over the transactions in the Omnipaxos log.
-        if let Some(entries) = self.omni_paxos.read_entries(..) {
-            let iter = entries
-                .into_iter()
-                .flat_map(|log_entry| {
-                    match log_entry {
-                        LogEntry::Decided(decided_entry) => Some(decided_entry),
-                        LogEntry::Undecided(_undecided_entry) => Some(_undecided_entry),
-                        LogEntry::Snapshotted(SnapshottedEntry { .. }) => {None}
-                        LogEntry::Trimmed(_) | LogEntry::StopSign(_, _) => None,
-}
-                })
-                .map(|log_entry| {
-                    let tx_offset = log_entry.tx_offset;
-                    let tx_data = log_entry.tx_data;
-                    (tx_offset, tx_data)
-                });
-
-            // Box the iterator and return
-            Box::new(iter)
+        if let Some(entries) = &self.omni_paxos.read_entries(..) {
+            let entry_iter = entries.iter().flat_map(|entry| match entry {
+                LogEntry::Decided(log) => Some((log.tx_offset.clone(), log.tx_data.clone())),
+                _ => None,
+            });
+            Box::new(entry_iter.collect::<Vec<_>>().into_iter())
         } else {
-            // If read_entries returns None, return an empty iterator
+            // return empty iterator
             Box::new(std::iter::empty())
         }
     }
@@ -68,28 +53,23 @@ impl DurabilityLayer for OmniPaxosDurability {
         &self,
         offset: TxOffset,
     ) -> Box<dyn Iterator<Item = (TxOffset, TxData)>> {
-        if let Some(entries) = self.omni_paxos.read_entries(offset.0..) {
-            let iter = entries
-                .into_iter()
-                .flat_map(|log_entry| {
-                    match log_entry {
-                        LogEntry::Decided(decided_entry) => Some(decided_entry),
-                        LogEntry::Undecided(undecided_entry) => Some(undecided_entry),
-                        LogEntry::Snapshotted(SnapshottedEntry { .. }) => {None}
-                        LogEntry::Trimmed(_) | LogEntry::StopSign(_, _) => None,
+        if let Some(entries) = &self.omni_paxos.read_entries(..) {
+            let entry_iter = entries.iter().filter_map(|entry| match entry {
+                LogEntry::Decided(log) => {
+                    if log.tx_offset >= offset {
+                        Some((log.tx_offset.clone(), log.tx_data.clone()))
+                    } else {
+                        None
                     }
-                })
-                .map(|log_entry| {
-                    let tx_offset = log_entry.tx_offset;
-                    let tx_data = log_entry.tx_data;
-                    (tx_offset, tx_data)
-                });
-            Box::new(iter)
+                }
+                _ => None,
+            });
+            Box::new(entry_iter.collect::<Vec<_>>().into_iter())
         } else {
+            // return empty iterator
             Box::new(std::iter::empty())
         }
     }
-
     fn append_tx(&mut self, tx_offset: TxOffset, tx_data: TxData) {
         // You need to implement this method based on your requirements.
         // It should append the given transaction to the Omnipaxos log.
@@ -112,5 +92,4 @@ impl DurabilityLayer for OmniPaxosDurability {
         let index = self.omni_paxos.get_decided_idx();
         return TxOffset(index);
     }
-    
 }

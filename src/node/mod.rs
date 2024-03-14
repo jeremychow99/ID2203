@@ -47,14 +47,9 @@ impl NodeRunner {
             let receiver = msg.get_receiver();
 
             let channel = self.outgoing.get_mut(&receiver).expect("No channels");
-            if !self
-                .node
-                .lock()
-                .unwrap()
-                .disconnected_nodes
-                .contains(&receiver)
-            {
-                let _res = channel.send(msg).await;
+            if self.node.lock().unwrap().connected_nodes[receiver as usize - 1] == true {
+                let channel = self.outgoing.get_mut(&receiver).expect("No channel");
+                let _ = channel.send(msg).await;
             }
         }
     }
@@ -64,7 +59,7 @@ impl NodeRunner {
         let mut outgoing_interval = time::interval(OUTGOING_MESSAGE_PERIOD);
         let mut tick_interval = time::interval(TICK_PERIOD);
         let mut update_db_tick_interval = time::interval(UPDATE_DB_PERIOD);
-        let mut remove_ndisconected_nodes_interval = time::interval(UPDATE_DB_PERIOD);
+        let mut leader_time_out = time::interval(WAIT_LEADER_TIMEOUT);
 
         sleep(Duration::from_secs(1)).await;
         loop {
@@ -72,17 +67,26 @@ impl NodeRunner {
                 biased;
                 _ = tick_interval.tick() => {
                     self.node.lock().unwrap().omni_durability.omni_paxos.tick();
-                    self.node.lock().unwrap().update_leader();
                 },
                 _ = outgoing_interval.tick() => {
-                    self.send_outgoing_msgs().await;
+                    if self.node.lock().unwrap().allow_msg {
+                        self.send_outgoing_msgs().await;
+                    }
                 },
                 _ = update_db_tick_interval.tick() => {
-                    self.node.lock().unwrap().apply_replicated_txns();
+                    let current_leader = self.node.lock().unwrap().omni_durability.omni_paxos.get_current_leader();
+                    if current_leader != Some(self.node.lock().unwrap().node_id) {
+                        self.node.lock().unwrap().apply_replicated_txns();
+                    }
+                },
+                _ = leader_time_out.tick() => {
+                    self.node.lock().unwrap().update_leader();
                 },
                 Some(msg) = self.incoming.recv() => {
                     let receiver = msg.get_receiver();
-                    self.node.lock().unwrap().omni_durability.omni_paxos.handle_incoming(msg);
+                    if self.node.lock().unwrap().allow_msg {
+                    self.node.lock().unwrap().omni_durability.omni_paxos.handle_incoming(msg)
+                    };
                 }
             }
         }
@@ -93,9 +97,8 @@ pub struct Node {
     node_id: NodeId,
     pub omni_durability: OmniPaxosDurability,
     data_store: ExampleDatastore,
-    disconnected_nodes: Vec<NodeId>,
-    latest_leader: NodeId,
-    latest_decided_idx: u64, //
+    allow_msg: bool,
+    connected_nodes: Vec<bool>,
 }
 
 impl Node {
@@ -103,9 +106,8 @@ impl Node {
         Node {
             node_id,
             omni_durability,
-            latest_decided_idx: 0,
-            latest_leader: 0,
-            disconnected_nodes: vec![],
+            allow_msg: true,
+            connected_nodes: vec![true; 4],
             data_store: ExampleDatastore::new(),
         }
     }
@@ -115,16 +117,12 @@ impl Node {
     /// If a node loses leadership, it needs to rollback the txns committed in
     /// memory that have not been replicated yet.
     pub fn update_leader(&mut self) {
-        let leader = match self.omni_durability.omni_paxos.get_current_leader() {
-            Some(id) => id,
-            None => return {},
-        };
-        if leader == self.node_id && self.latest_leader != self.node_id {
+        let leader_id = self.omni_durability.omni_paxos.get_current_leader();
+        if leader_id == Some(self.node_id) {
             self.apply_replicated_txns();
-        } else if self.latest_leader == self.node_id && leader != self.node_id {
+        } else {
             self.rollback_unreplicated_txns();
         }
-        self.latest_leader = leader;
     }
 
     /// Apply the transactions that have been decided in OmniPaxos to the Datastore.
@@ -132,46 +130,22 @@ impl Node {
     /// behavior in the Datastore as defined by the application.
     fn apply_replicated_txns(&mut self) {
         // apply replicated transactions if follower
-        let curr_idx = self.omni_durability.omni_paxos.get_decided_idx();
-        if curr_idx > self.latest_decided_idx {
-            let entries = self
-                .omni_durability
-                .iter_starting_from_offset(TxOffset(self.latest_decided_idx));
-
-            for (tx_offset, tx_data) in entries.into_iter() {
-                for insert_list in tx_data.inserts.iter() {
-                    for insert in insert_list.inserts.iter() {
-                        let mut tx = self.data_store.begin_mut_tx();
-                        let row = example_datastore::deserialize_example_row(&insert.0).unwrap();
-                        tx.set(row.key, row.value);
-                        self.data_store
-                            .commit_mut_tx(tx)
-                            .unwrap_or_else(|err| panic!("Error commiting {:?}", err));
-                    }
-                }
-
-                for delete_list in tx_data.deletes.iter() {
-                    for deleted_item in delete_list.deletes.iter() {
-                        let mut tx = self.data_store.begin_mut_tx();
-                        let row =
-                            example_datastore::deserialize_example_row(&deleted_item.0).unwrap();
-                        tx.delete(&row.key);
-                        self.data_store
-                            .commit_mut_tx(tx)
-                            .unwrap_or_else(|err| panic!("Error commiting {:?}", err));
-                    }
-                }
-
-                self.advance_replicated_durability_offset();
+        self.advance_replicated_durability_offset().unwrap();
+        let current_tx_offset = self.omni_durability.get_durable_tx_offset();
+        let mut txns = self
+            .omni_durability
+            .iter_starting_from_offset(current_tx_offset);
+        while let Some((_tx_offset, tx_data)) = txns.next() {
+            if let Err(err) = self.data_store.replay_transaction(&tx_data) {
+                // println!("Error: {}", err);
             }
         }
     }
 
     fn rollback_unreplicated_txns(&mut self) {
-        let current_idx: u64 = self.omni_durability.omni_paxos.get_decided_idx();
-        let committed_idx = self.latest_decided_idx;
-        if current_idx < committed_idx {
-            _ = self.data_store.rollback_to_replicated_durability_offset();
+        self.advance_replicated_durability_offset().unwrap();
+        if let Err(err) = self.data_store.rollback_to_replicated_durability_offset() {
+            println!("Error: {}", err);
         }
     }
 
@@ -204,7 +178,8 @@ impl Node {
         tx: <ExampleDatastore as Datastore<String, String>>::MutTx,
     ) -> Result<TxResult, DatastoreError> {
         if self.omni_durability.omni_paxos.get_current_leader() == Some(self.node_id) {
-            self.data_store.commit_mut_tx(tx)
+            let tx_res = self.data_store.commit_mut_tx(tx);
+            tx_res
         } else {
             Err(DatastoreError::NotLeader)
         }
@@ -241,7 +216,7 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
 
-    const SERVERS: [NodeId; 3] = [1, 2, 3];
+    const SERVERS: [NodeId; 4] = [1, 2, 3, 4];
 
     #[allow(clippy::type_complexity)]
     fn initialise_channels() -> (
@@ -317,7 +292,7 @@ mod tests {
         std::thread::sleep(WAIT_LEADER_TIMEOUT * 2);
         let (node, _) = nodes.get(&1).expect("Node not found");
 
-        // Access the Node instance and perform transactions
+        // get leader node
         let leader_id = {
             let node_ref = node.lock().unwrap();
             node_ref
@@ -337,7 +312,9 @@ mod tests {
             .unwrap()
             .omni_durability
             .append_tx(tx_res.tx_offset, tx_res.tx_data);
+
         std::thread::sleep(WAIT_DECIDED_TIMEOUT * 20);
+
 
         // Verify the committed data
         let last_replicated_tx = leader_node
@@ -347,29 +324,30 @@ mod tests {
 
         let res = last_replicated_tx.get(&"test".to_string());
         if let Some(value) = res {
-            println!("Transaction result: {}", value);
+            println!("Transaction result for origninal leader: {}", value);
             assert_eq!(value, "testvalue");
         } else {
             println!("Transaction result is None.");
         }
 
-        // Verify the committed data
+        // Verify the committed data on another node
         let (node_2, _) = nodes.get(&2).expect("Node not found");
         {
             let node_2 = node_2.lock().unwrap();
             let tx = node_2.begin_tx(DurabilityLevel::Replicated);
             let res = tx.get(&"test".to_string());
             if let Some(value) = res {
-                println!("Transaction result: {}", value);
+                println!("Transaction result for node 2: {}", value);
                 assert_eq!(value, "testvalue");
             } else {
                 println!("Transaction result is None.");
             }
         };
 
-        assert_eq!(nodes.len(), 3); // Ensure the expected number of nodes
+        assert_eq!(nodes.len(), 4); // Ensure the expected number of nodes
         runtime.shutdown_background();
     }
+
     #[tokio::test]
     async fn test_kill_node_elect_new() {
         //setting up the runtime and nodes for operation
@@ -384,6 +362,7 @@ mod tests {
         let (specific_node, _) = node_registry.get(&1).expect("Node not located");
         //identify the leading node in the network
         let current_leader = specific_node
+
             .lock()
             .unwrap()
             .omni_durability
@@ -433,12 +412,109 @@ mod tests {
 
         let (active_node, _) = node_registry.get(live_nodes[0]).unwrap();
         let elected_leader = active_node
+
             .lock()
             .unwrap()
             .omni_durability
             .omni_paxos
             .get_current_leader()
             .unwrap();
+        println!("new leader id is: {:?}", new_leader);
+        assert_ne!(new_leader, leader);
+
+        let (new_leader_node, _) = nodes.get(&new_leader).unwrap();
+
+        // check that txn is replicated on new leader
+        let tx = new_leader_node
+            .lock()
+            .unwrap()
+            .begin_tx(DurabilityLevel::Replicated);
+
+        println!("VALUE ON NEW LEADER {:?}", tx.get(&"test".to_string()));
+        assert_eq!(tx.get(&"test".to_string()), Some("testvalue".to_string()));
+
+        runtime.shutdown_background();
+    }
+
+    // fn test_3() {
+    //     let mut runtime = create_runtime();
+    //     let mut nodes: HashMap<u64, (Arc<Mutex<Node>>, JoinHandle<()>)> = spawn_nodes(&mut runtime);
+    //     std::thread::sleep(WAIT_LEADER_TIMEOUT);
+    //     let (node, _) = nodes.get(&1).expect("Node not found");
+    //     // get leader node
+    //     let leader = node
+    //         .lock()
+    //         .unwrap()
+    //         .omni_durability
+    //         .omni_paxos
+    //         .get_current_leader()
+    //         .expect("No leader elected");
+
+    //     let (leader_node, leader_handle) = nodes.get(&leader).unwrap();
+
+    //     std::thread::sleep(WAIT_DECIDED_TIMEOUT * 2);
+    //     let _removed:Vec<()> = nodes.iter().map(|(node_id, _)| leader_node.lock().unwrap().remove_node(*node_id)).collect();
+
+    //     std::thread::sleep(Duration::from_secs(2));
+    //     let alive_servers:Vec<&u64> = SERVERS.iter().filter(|&&id| id != leader).collect();
+    //     let (alive_server, handler) = nodes.get(alive_servers[0]).unwrap();
+
+    // }
+
+    #[test]
+    fn test_constrained_election() {
+        let mut runtime = create_runtime();
+        let nodes = spawn_nodes(&mut runtime);
+        std::thread::sleep(WAIT_LEADER_TIMEOUT * 5);
+        let (node_1, _) = nodes.get(&1).unwrap();
+
+        let leader = node_1
+            .lock()
+            .unwrap()
+            .omni_durability
+            .omni_paxos
+            .get_current_leader()
+            .expect("Failed to get leader");
+
+        println!("Nodes: {:?}", SERVERS);
+        println!("Leader: {}", leader);
+
+        for node_id in SERVERS {
+            if node_id != leader {
+                let (node, _) = nodes.get(&node_id).unwrap();
+                // remove the leader from the connected nodes
+                node.lock().unwrap().connected_nodes[leader as usize - 1] = false
+            }
+        }
+        std::thread::sleep(WAIT_LEADER_TIMEOUT * 2);
+        let alive_servers: Vec<&u64> = SERVERS.iter().filter(|&&id| id != leader).collect();
+        let (server, _) = nodes.get(&leader).unwrap();
+        // stop messages from being sent
+        server.lock().unwrap().allow_msg = false;
+
+        //Give some time for the effect to take place
+        std::thread::sleep(WAIT_LEADER_TIMEOUT * 15);
+        
+        println!("Unisolated servers: {:?}", alive_servers);
+
+        let isolated_leader = server
+            .lock()
+            .unwrap()
+            .omni_durability
+            .omni_paxos
+            .get_current_leader()
+            .expect("Failed to get leader");
+        println!("Old Isolated leader: {}", isolated_leader);
+
+        let (alive_node, _handler) = nodes.get(alive_servers[0]).unwrap();
+        //Get the new leader from a node that is not the leader
+        let new_leader = alive_node.lock().unwrap()
+            .omni_durability
+            .omni_paxos
+            .get_current_leader()
+            .expect("Failed to get leader");
+        println!("Newly Elected leader: {}", new_leader);
+
         println!("elected leader node {:?}", elected_leader);
         assert_ne!(elected_leader, current_leader);
 
@@ -449,6 +525,7 @@ mod tests {
             .lock()
             .unwrap()
             .begin_tx(DurabilityLevel::Replicated);
+
 
         println!(
             "TRANSACTION DATA ON NEW LEADER {:?}",
